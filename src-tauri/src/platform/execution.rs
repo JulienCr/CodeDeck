@@ -50,7 +50,14 @@ impl Default for ExecutionTarget {
 }
 
 #[cfg(target_os = "windows")]
-const POWERSHELL_UTF8_PREFIX: &str = "chcp 65001 > $null; ";
+const POWERSHELL_UTF8_PREFIX: &str = "chcp 65001 > $null";
+
+// pwsh -Command collapses any failing native command's exit code to 1.
+// $LASTEXITCODE holds the real one; a non-terminating cmdlet failure instead
+// leaves $LASTEXITCODE untouched but clears $?, so both are checked.
+#[cfg(target_os = "windows")]
+const POWERSHELL_EXIT_CODE_SUFFIX: &str =
+    "if (-not $?) { exit $(if ($LASTEXITCODE) { $LASTEXITCODE } else { 1 }) }\nexit $LASTEXITCODE";
 
 #[cfg(target_os = "windows")]
 fn windows_shell_executable(shell: NativeShell) -> &'static str {
@@ -61,13 +68,20 @@ fn windows_shell_executable(shell: NativeShell) -> &'static str {
     }
 }
 
+// Newline-joined, not `;`: a script ending in a `#` comment would swallow a
+// `;`-joined suffix and the exit-code lines would never run.
+#[cfg(target_os = "windows")]
+fn powershell_script(script: &str) -> String {
+    format!("{POWERSHELL_UTF8_PREFIX}\n{script}\n{POWERSHELL_EXIT_CODE_SUFFIX}")
+}
+
 #[cfg(target_os = "windows")]
 fn powershell_arguments(script: &str) -> Vec<String> {
     vec![
         "-NoLogo".to_string(),
         "-NonInteractive".to_string(),
         "-Command".to_string(),
-        format!("{POWERSHELL_UTF8_PREFIX}{script}"),
+        powershell_script(script),
     ]
 }
 
@@ -270,7 +284,7 @@ mod tests {
                     "-NoLogo".to_string(),
                     "-NonInteractive".to_string(),
                     "-Command".to_string(),
-                    "chcp 65001 > $null; pnpm dev".to_string(),
+                    "chcp 65001 > $null\npnpm dev\nif (-not $?) { exit $(if ($LASTEXITCODE) { $LASTEXITCODE } else { 1 }) }\nexit $LASTEXITCODE".to_string(),
                 ]
             );
         }
@@ -285,10 +299,15 @@ mod tests {
         fn powershell_arguments_keep_a_quoted_script_as_one_element() {
             let script = r#"pnpm run "say \"hi\"""#;
             let args = powershell_arguments(script);
-            assert_eq!(
-                args.last().unwrap(),
-                &format!("{POWERSHELL_UTF8_PREFIX}{script}")
-            );
+            assert_eq!(args.last().unwrap(), &powershell_script(script));
+        }
+
+        #[test]
+        fn powershell_arguments_propagate_the_native_exit_code() {
+            let args = powershell_arguments("cmd /c exit 3");
+            let script = args.last().unwrap();
+            assert!(script.contains("exit $LASTEXITCODE"));
+            assert!(script.contains("if (-not $?)"));
         }
 
         #[test]
