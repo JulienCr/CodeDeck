@@ -1,0 +1,104 @@
+name: AI PR review
+
+# Aristarque (JulienCr/gh-actions) reviews a PR against the doctrine below, never failing the job.
+# A missing OLLAMA_API_KEY is silent: no comment means "not reviewed", not "clean".
+# Top-level comment, not a review; no re-run on push, so comment "@aristarque review".
+
+on:
+  pull_request:
+    types: [opened, ready_for_review]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: 'Number of the PR to review'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: write
+  # The 👀 reaction targets a PR conversation comment, which the API treats as an issue comment.
+  issues: write
+  # For the "aristarque/review" commit status; see "status-check" below.
+  statuses: write
+
+jobs:
+  review:
+    # Security, not comfort: issue_comment runs with the repo secrets and a write token on
+    # anyone's comment, and this repo is public. Without the author allowlist a stranger
+    # can drain the Ollama key. A mention overrides the draft rule, on purpose.
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'pull_request' && github.event.pull_request.draft == false)
+      || (github.event_name == 'issue_comment'
+          && github.event.issue.pull_request
+          && github.event.comment.user.login == 'JulienCr'
+          && contains(github.event.comment.body, '@aristarque review'))
+    runs-on: ubuntu-latest
+    # Job level on purpose: at workflow level, a stranger's comment run joins the group
+    # before the guard above is evaluated, and cancels the review in progress.
+    concurrency:
+      group: pr-review-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr }}
+      cancel-in-progress: true
+    # Parallel passes then a merge: twice the action's own timeout-minutes, plus the margin
+    # the failure comment needs. Three times if a DeepSeek key is ever added.
+    timeout-minutes: 45
+    steps:
+      # A comment-triggered run shows no check on the PR; this is the only acknowledgement.
+      # continue-on-error because a failing ack would skip checkout and the review with it.
+      - name: Acknowledge the mention
+        if: github.event_name == 'issue_comment'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api -X POST \
+            "repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions" \
+            -f content=eyes
+
+      # PR head, not the merge commit, so the line numbers the model cites match the diff.
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || format('refs/pull/{0}/head', github.event.issue.number || inputs.pr) }}
+          persist-credentials: false
+
+      # @main, not a major tag, as on the other repos: a prompt fix lands here without a
+      # commit. Tenable because gh-actions CI rejects a stale dist/ and the job never fails.
+      - name: Review the pull request
+        uses: JulienCr/gh-actions/pr-review@main
+        with:
+          pr: ${{ github.event.pull_request.number || github.event.issue.number || inputs.pr }}
+          # Kill switch in Settings → Variables. Set it to false to turn off: a DELETED
+          # variable reads as empty, which the action treats as on.
+          enable: ${{ vars.ENABLE_ARISTARQUE }}
+          ollama-api-key: ${{ secrets.OLLAMA_API_KEY }}
+          # CLAUDE.md carries the architecture and the cross-platform rules, CONTRIBUTING.md
+          # the project rules CLAUDE.md points at, terminals.md the spec behind the shell work.
+          doctrine: |
+            CLAUDE.md
+            CONTRIBUTING.md
+            docs/specs/terminals.md
+            docs/releasing.md
+          # Tauri-generated schemas, and release files that pnpm release writes from commits.
+          skip: |
+            src-tauri/gen/**
+            CHANGELOG.md
+            RELEASE_NOTES_v*.md
+          # The status is what makes an armed auto-merge wait, once declared required in the
+          # branch protection. Left informative here: a fork PR has no secrets, so the action
+          # stays silent and a required-but-absent status would block it with no recourse.
+          status-check: true
+
+      # A run killed by cancel-in-progress or by timeout-minutes never reaches the end of the
+      # program: without this, its announcement stays "in progress" and its status pending.
+      - name: Report an interrupted review
+        if: always() && (cancelled() || failure())
+        continue-on-error: true
+        uses: JulienCr/gh-actions/pr-review@main
+        with:
+          pr: ${{ github.event.pull_request.number || github.event.issue.number || inputs.pr }}
+          mode: abort
+          status-check: true
