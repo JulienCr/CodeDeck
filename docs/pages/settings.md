@@ -34,6 +34,8 @@ Leave the custom terminal command empty to use Code Deck's platform-specific def
 
 The terminal is opened with the project directory as its starting folder where supported.
 
+On Windows, choose the **Standard-Befehlsshell (Windows)** used to run project commands and to open the terminal: platform default, Command Prompt, PowerShell 7 or Windows PowerShell. PowerShell loads your user profile, so tools initialised there (such as `fnm`) end up on the PATH, which Command Prompt does not see. The field only appears on Windows; a project can override it on its own details page.
+
 ## Default project folder
 
 This directory is used as the initial location for project creation, folder selection and scanning. It is only a convenience setting; projects may still be stored elsewhere.

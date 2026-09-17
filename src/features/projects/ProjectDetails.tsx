@@ -6,8 +6,11 @@ import { Modal } from "../../shared/components/Modal";
 import { useI18n } from "../../shared/i18n/I18n";
 import { createId } from "../../shared/lib/storage";
 import { getDetectedTechnologies } from "../../shared/lib/projectInspection";
+import { nativeShellLabel, resolveNativeShell } from "../../shared/lib/execution";
 import type {
+  CommandShellInfo,
   Editor,
+  NativeShell,
   Project,
   ProjectCommand,
   ProjectInspection,
@@ -17,6 +20,8 @@ type ProjectDetailsProps = {
   project?: Project;
   editors: Editor[];
   githubToken: string;
+  commandShells: CommandShellInfo[];
+  globalCommandShell: NativeShell;
   onClose: () => void;
   onUpdate: (project: Project) => void;
   onDelete: (projectId: string) => void;
@@ -36,11 +41,12 @@ type ProjectDetailsProps = {
 
 type Tab = "overview" | "commands" | "git" | "github" | "edit";
 
-
 export function ProjectDetails({
   project,
   editors,
   githubToken,
+  commandShells,
+  globalCommandShell,
   onClose,
   onUpdate,
   onDelete,
@@ -64,7 +70,7 @@ export function ProjectDetails({
   const [editingCommandId, setEditingCommandId] = useState<string>();
   const [refreshing, setRefreshing] = useState(false);
   const [draft, setDraft] = useState<Project>();
-  const [runtimeDraft, setRuntimeDraft] = useState({ buildCommand: "", runCommand: "", devPort: "" });
+  const [runtimeDraft, setRuntimeDraft] = useState<{ buildCommand: string; runCommand: string; devPort: string; commandShell: NativeShell | "inherit" }>({ buildCommand: "", runCommand: "", devPort: "", commandShell: "inherit" });
 
   useEffect(() => {
     setTab("overview");
@@ -79,6 +85,7 @@ export function ProjectDetails({
       buildCommand: project?.buildCommand ?? "",
       runCommand: project?.runCommand ?? "",
       devPort: project?.devPort ? String(project.devPort) : "",
+      commandShell: project?.commandShell ?? "inherit",
     });
   }, [project]);
 
@@ -94,6 +101,8 @@ export function ProjectDetails({
   const detectedLanguages = technologies.filter((entry) => entry.kind === "language").map((entry) => entry.label);
   const detectedFrameworks = technologies.filter((entry) => entry.kind === "framework").map((entry) => entry.label);
   const detectedTools = technologies.filter((entry) => entry.kind === "tool").map((entry) => entry.label);
+  const effectiveCommandShell = resolveNativeShell(currentProject, { commandShell: globalCommandShell });
+  const globalShellName = nativeShellLabel(t, globalCommandShell);
 
   function saveCommand(event: React.FormEvent) {
     event.preventDefault();
@@ -171,6 +180,7 @@ export function ProjectDetails({
       buildCommand: runtimeDraft.buildCommand.trim(),
       runCommand: runtimeDraft.runCommand.trim(),
       devPort: port,
+      commandShell: runtimeDraft.commandShell === "inherit" ? undefined : runtimeDraft.commandShell,
       updatedAt: new Date().toISOString(),
     });
     onSuccess(t("Build-, Run- und Port-Einstellungen wurden gespeichert.", "Build, run and port settings were saved."));
@@ -201,6 +211,9 @@ export function ProjectDetails({
                 {technologies.slice(0, 8).map((technology) => (
                   <span className={`badge badge--${technology.kind}`} key={`${technology.kind}:${technology.label}`}><i aria-hidden="true" />{technology.label}</span>
                 ))}
+                {effectiveCommandShell !== "platformDefault" && (
+                  <span className="badge badge--muted">Windows · {nativeShellLabel(t, effectiveCommandShell)}</span>
+                )}
               </div>
             </div>
           </div>
@@ -307,6 +320,15 @@ export function ProjectDetails({
                   <div className="form-field"><label htmlFor="runtime-build-command">{t("Build-Command", "Build command")}</label><input id="runtime-build-command" value={runtimeDraft.buildCommand} onChange={(event) => setRuntimeDraft({ ...runtimeDraft, buildCommand: event.target.value })} placeholder="pnpm build" /></div>
                   <div className="form-field"><label htmlFor="runtime-run-command">{t("Run-Command", "Run command")}</label><input id="runtime-run-command" value={runtimeDraft.runCommand} onChange={(event) => setRuntimeDraft({ ...runtimeDraft, runCommand: event.target.value })} placeholder="pnpm dev -- --port {port}" /><small>{t("Nutze optional {port}. Zusätzlich setzt Code Deck PORT, SERVER_PORT und VITE_PORT.", "Optionally use {port}. Code Deck also sets PORT, SERVER_PORT and VITE_PORT.")}</small></div>
                   <div className="form-field"><label htmlFor="runtime-port">{t("Entwicklungs-Port", "Development port")}</label><input id="runtime-port" inputMode="numeric" value={runtimeDraft.devPort} onChange={(event) => setRuntimeDraft({ ...runtimeDraft, devPort: event.target.value.replace(/\D/g, "") })} placeholder="5173" /></div>
+                  {commandShells.length > 0 && (
+                    <div className="form-field">
+                      <label htmlFor="runtime-command-shell">{t("Befehlsshell", "Command shell")}</label>
+                      <select id="runtime-command-shell" value={runtimeDraft.commandShell} onChange={(event) => setRuntimeDraft({ ...runtimeDraft, commandShell: event.target.value as NativeShell | "inherit" })}>
+                        <option value="inherit">{t(`Global übernehmen (${globalShellName})`, `Inherit global (${globalShellName})`)}</option>
+                        {commandShells.map((shell) => <option key={shell.id} value={shell.id}>{nativeShellLabel(t, shell.id)}</option>)}
+                      </select>
+                    </div>
+                  )}
                 </div>
                 <div className="form-actions"><button className="button button--secondary" type="submit"><Icon name="check" />{t("Run-Konfiguration speichern", "Save run configuration")}</button></div>
               </form>

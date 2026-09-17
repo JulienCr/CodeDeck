@@ -19,6 +19,7 @@ import { resolveRuntimeCommand, runtimeEnvironment, suggestBuildCommand, suggest
 import {
   chooseConfigFile,
   chooseExportPath,
+  detectCommandShells,
   detectEditors,
   inspectProject,
   isTauri,
@@ -33,6 +34,7 @@ import {
   stopProcess,
   writeTextFile,
 } from "../shared/lib/tauri";
+import { resolveExecutionTarget, resolveNativeShell } from "../shared/lib/execution";
 import {
   checkForAppUpdate,
   getCurrentAppVersion,
@@ -42,6 +44,7 @@ import {
 } from "../shared/lib/updater";
 import type {
   AppData,
+  CommandShellInfo,
   Editor,
   ProcessRun,
   Project,
@@ -152,8 +155,10 @@ export function App() {
   const [updateInstalling, setUpdateInstalling] = useState(false);
   const [updateProgress, setUpdateProgress] = useState<UpdateProgress>();
   const [updateError, setUpdateError] = useState<string>();
+  const [commandShells, setCommandShells] = useState<CommandShellInfo[]>([]);
   const searchRef = useRef<HTMLInputElement>(null);
   const startupUpdateCheckStarted = useRef(false);
+  const startupCommandShellScanStarted = useRef(false);
   const startupIdeScanStarted = useRef(false);
   const startupLaunchSetsStarted = useRef(false);
   const t = (german: string, english: string) => translate(data.settings.language, german, english);
@@ -317,6 +322,15 @@ export function App() {
           settings: { ...current.settings, ideDetectionComplete: true },
         }));
       });
+  }, []);
+
+  useEffect(() => {
+    if (startupCommandShellScanStarted.current || !isTauri()) return;
+    startupCommandShellScanStarted.current = true;
+
+    void detectCommandShells()
+      .then(setCommandShells)
+      .catch(() => setCommandShells([]));
   }, []);
 
   useEffect(() => {
@@ -535,7 +549,7 @@ export function App() {
 
   async function openProjectTerminal(project: Project) {
     try {
-      await openTerminal(project.path, data.settings.terminalCommand);
+      await openTerminal(project.path, data.settings.terminalCommand, resolveExecutionTarget(project, data.settings));
     } catch (error) {
       pushToast("error", t("Terminal konnte nicht geöffnet werden", "Could not open terminal"), errorMessage(error));
     }
@@ -583,6 +597,7 @@ export function App() {
         safeCommand.env,
         safeCommand.label,
         data.settings.notifyOnCommandCompletion,
+        resolveExecutionTarget(project, data.settings),
       );
       setData((current) => ({
         ...current,
@@ -970,6 +985,7 @@ export function App() {
                   key={project.id}
                   project={project}
                   editor={editorById.get(project.preferredEditorId ?? "")}
+                  effectiveCommandShell={resolveNativeShell(project, data.settings)}
                   onOpenDetails={() => setSelectedProjectId(project.id)}
                   onOpenEditor={() => void openProjectEditor(project)}
                   onOpenTodos={() => setTodoProjectId(project.id)}
@@ -1029,6 +1045,8 @@ export function App() {
         project={selectedProject}
         editors={data.editors}
         githubToken={data.settings.githubToken}
+        commandShells={commandShells}
+        globalCommandShell={data.settings.commandShell}
         onClose={() => setSelectedProjectId(undefined)}
         onUpdate={updateProject}
         onDelete={deleteProject}
@@ -1056,6 +1074,7 @@ export function App() {
         editors={data.editors}
         projectTemplates={data.projectTemplates}
         settings={data.settings}
+        commandShells={commandShells}
         currentVersion={currentVersion}
         checkingForUpdates={checkingForUpdates}
         initialSection={settingsInitialSection}
