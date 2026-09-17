@@ -10,7 +10,10 @@ use tauri::{AppHandle, Emitter};
 #[cfg(target_os = "windows")]
 use crate::platform::launchers::hide_console_window;
 use crate::{
-    platform::{launchers::shell_command, notifications::send_system_notification},
+    platform::{
+        execution::{build_execution_command, ExecutionTarget},
+        notifications::send_system_notification,
+    },
     process::state::{ProcessExitEvent, ProcessOutputEvent, ProcessStarted},
     projects::validation::display_path,
 };
@@ -69,6 +72,7 @@ pub(crate) fn start_process(
     env: HashMap<String, String>,
     label: String,
     notify_on_exit: bool,
+    execution_target: Option<ExecutionTarget>,
 ) -> Result<ProcessStarted, String> {
     if command.trim().is_empty() {
         return Err("Der Command ist leer.".to_string());
@@ -98,9 +102,9 @@ pub(crate) fn start_process(
         ));
     }
 
-    let mut process = shell_command(&command);
+    let target = execution_target.unwrap_or_default();
+    let mut process = build_execution_command(&target, &command, &run_dir)?;
     process
-        .current_dir(&run_dir)
         .envs(env)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

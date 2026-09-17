@@ -9,6 +9,9 @@ use std::{
 #[cfg(target_os = "windows")]
 use walkdir::WalkDir;
 
+use crate::platform::execution::ExecutionTarget;
+#[cfg(target_os = "windows")]
+use crate::platform::execution::NativeShell;
 use crate::projects::validation::{display_path, project_name};
 
 #[cfg(target_os = "windows")]
@@ -957,7 +960,44 @@ fn linux_terminal_arguments(program: &str, executable: &Path, project_path: &str
     Vec::new()
 }
 
-pub(crate) fn open_terminal(project_path: String, terminal_command: String) -> Result<(), String> {
+#[cfg(target_os = "windows")]
+fn windows_terminal_arguments(shell: NativeShell, project_path: &str) -> (String, Vec<String>) {
+    match shell {
+        NativeShell::PlatformDefault | NativeShell::Cmd => (
+            "cmd.exe".to_string(),
+            vec![
+                "/K".to_string(),
+                format!("cd /d \"{}\"", project_path.replace('"', "\"\"")),
+            ],
+        ),
+        NativeShell::PowerShell7 => (
+            "pwsh.exe".to_string(),
+            vec![
+                "-NoLogo".to_string(),
+                "-WorkingDirectory".to_string(),
+                project_path.to_string(),
+            ],
+        ),
+        NativeShell::WindowsPowerShell => (
+            "powershell.exe".to_string(),
+            vec![
+                "-NoLogo".to_string(),
+                "-NoExit".to_string(),
+                "-Command".to_string(),
+                format!(
+                    "Set-Location -LiteralPath '{}'",
+                    project_path.replace('\'', "''")
+                ),
+            ],
+        ),
+    }
+}
+
+pub(crate) fn open_terminal(
+    project_path: String,
+    terminal_command: String,
+    execution_target: Option<ExecutionTarget>,
+) -> Result<(), String> {
     let path = PathBuf::from(&project_path);
     if !path.is_dir() {
         return Err(format!("Projektordner nicht gefunden: {project_path}"));
@@ -975,11 +1015,15 @@ pub(crate) fn open_terminal(project_path: String, terminal_command: String) -> R
             .map_err(|error| format!("Terminal konnte nicht gestartet werden: {error}"));
     }
 
+    // The custom-terminal branch above stays cmd-flavored regardless of the
+    // project's command shell (spec: the two settings are independent).
+    let ExecutionTarget::Native { shell } = execution_target.unwrap_or_default();
+
     #[cfg(target_os = "windows")]
     {
-        let change_directory = format!("cd /d \"{}\"", project_path.replace('"', "\"\""));
-        Command::new("cmd.exe")
-            .args(["/K", &change_directory])
+        let (program, arguments) = windows_terminal_arguments(shell, &project_path);
+        Command::new(program)
+            .args(arguments)
             .current_dir(&path)
             .spawn()
             .map(|_| ())
@@ -988,6 +1032,7 @@ pub(crate) fn open_terminal(project_path: String, terminal_command: String) -> R
 
     #[cfg(target_os = "macos")]
     {
+        let _ = shell;
         Command::new("open")
             .args(["-a", "Terminal", &project_path])
             .spawn()
@@ -997,6 +1042,7 @@ pub(crate) fn open_terminal(project_path: String, terminal_command: String) -> R
 
     #[cfg(all(unix, not(target_os = "macos")))]
     {
+        let _ = shell;
         let mut launch_errors = Vec::new();
 
         for program in [
@@ -1060,6 +1106,72 @@ mod tests {
         assert!(
             linux_terminal_arguments("xterm", Path::new("/usr/bin/xterm"), "/tmp/project",)
                 .is_empty()
+        );
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod windows_terminal_tests {
+    use super::{windows_terminal_arguments, NativeShell};
+
+    #[test]
+    fn cmd_uses_the_classic_change_directory_form() {
+        let (program, args) = windows_terminal_arguments(NativeShell::Cmd, "C:\\dev\\foo");
+        assert_eq!(program, "cmd.exe");
+        assert_eq!(
+            args,
+            vec!["/K".to_string(), "cd /d \"C:\\dev\\foo\"".to_string()]
+        );
+    }
+
+    #[test]
+    fn platform_default_matches_cmd() {
+        let (program, args) =
+            windows_terminal_arguments(NativeShell::PlatformDefault, "C:\\dev\\foo");
+        assert_eq!(program, "cmd.exe");
+        assert_eq!(
+            args,
+            vec!["/K".to_string(), "cd /d \"C:\\dev\\foo\"".to_string()]
+        );
+    }
+
+    #[test]
+    fn powershell7_uses_working_directory_flag() {
+        let (program, args) = windows_terminal_arguments(NativeShell::PowerShell7, "C:\\dev\\foo");
+        assert_eq!(program, "pwsh.exe");
+        assert_eq!(
+            args,
+            vec![
+                "-NoLogo".to_string(),
+                "-WorkingDirectory".to_string(),
+                "C:\\dev\\foo".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn windows_powershell_uses_set_location_literal_path() {
+        let (program, args) =
+            windows_terminal_arguments(NativeShell::WindowsPowerShell, "C:\\dev\\foo");
+        assert_eq!(program, "powershell.exe");
+        assert_eq!(
+            args,
+            vec![
+                "-NoLogo".to_string(),
+                "-NoExit".to_string(),
+                "-Command".to_string(),
+                "Set-Location -LiteralPath 'C:\\dev\\foo'".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn windows_powershell_escapes_single_quotes_in_the_path() {
+        let (_, args) =
+            windows_terminal_arguments(NativeShell::WindowsPowerShell, "C:\\dev\\O'Brien");
+        assert_eq!(
+            args.last().unwrap(),
+            "Set-Location -LiteralPath 'C:\\dev\\O''Brien'"
         );
     }
 }

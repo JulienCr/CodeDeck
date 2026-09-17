@@ -102,7 +102,7 @@ The practical test: adding a new execution target should touch the spawn layer a
 Anything that assembles a command line is pure and must be unit-tested without spawning — that is the reason `fill_template`, `split_command_template`, `linux_terminal_arguments` and any path translation stay separate functions. Cover at minimum:
 
 - argument splitting and quoting for a path containing spaces, and for a path containing a quote;
-- the Windows `cmd.exe /D /S /C` form and the PowerShell argument list (`-NoProfile -NonInteractive`) — assert the built argv, never run it;
+- the Windows `cmd.exe /D /S /C` form and the PowerShell argument list (`-NoLogo -NonInteractive -Command`) — assert the built argv, never run it, and assert `-NoProfile` is **absent**: that negative check is the regression guard, since it is the flag a future contributor will helpfully add back;
 - Windows ↔ WSL path translation both ways, including a drive letter, a UNC path, and a path that must be left alone;
 - one test per branch of any new `#[cfg]` fork, gated with the same `#[cfg]` as the code it covers — `#[cfg(all(test, unix, not(target_os = "macos")))]` in `launchers.rs` is the existing pattern.
 
