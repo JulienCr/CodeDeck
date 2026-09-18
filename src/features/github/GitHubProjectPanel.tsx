@@ -4,7 +4,7 @@ import { Icon } from "../../shared/components/Icon";
 import { Markdown } from "../../shared/components/Markdown";
 import { useI18n } from "../../shared/i18n/I18n";
 import { getGitRemoteUrl, openTarget } from "../../shared/lib/tauri";
-import type { Project, ProjectInspection } from "../../shared/types/models";
+import type { ExecutionTarget, Project, ProjectInspection } from "../../shared/types/models";
 import { GitProjectPanel } from "../git/GitProjectPanel";
 import { GitBulkStagePanel } from "./GitBulkStagePanel";
 
@@ -12,6 +12,7 @@ import "./github.css";
 
 type GitHubProjectPanelProps = {
   project: Project;
+  executionTarget: ExecutionTarget;
   token: string;
   onOpenGitHubSettings: () => void;
   onRefreshInspection: () => Promise<ProjectInspection | undefined>;
@@ -145,6 +146,7 @@ async function githubRequest<T>(path: string, token: string, init: RequestInit =
 
 export function GitHubProjectPanel({
   project,
+  executionTarget,
   token,
   onOpenGitHubSettings,
   onRefreshInspection,
@@ -194,7 +196,7 @@ export function GitHubProjectPanel({
       setComments([]);
 
       try {
-        const remote = await getGitRemoteUrl(project.path);
+        const remote = await getGitRemoteUrl(project.path, executionTarget);
         if (cancelled) return;
 
         if (!remote) {
@@ -390,6 +392,7 @@ export function GitHubProjectPanel({
         </section>
         <GitBulkStagePanel
           project={project}
+          executionTarget={executionTarget}
           onRefreshInspection={onRefreshInspection}
           onStaged={() => setGitRefreshKey((value) => value + 1)}
           onSuccess={onSuccess}
@@ -398,6 +401,7 @@ export function GitHubProjectPanel({
         <GitProjectPanel
           key={gitRefreshKey}
           project={project}
+          executionTarget={executionTarget}
           onRefreshInspection={onRefreshInspection}
           onSuccess={onSuccess}
           onError={onError}
@@ -638,6 +642,7 @@ export function GitHubProjectPanel({
         <>
           <GitBulkStagePanel
             project={project}
+            executionTarget={executionTarget}
             onRefreshInspection={onRefreshInspection}
             onStaged={() => setGitRefreshKey((value) => value + 1)}
             onSuccess={onSuccess}
@@ -646,6 +651,7 @@ export function GitHubProjectPanel({
           <GitProjectPanel
             key={gitRefreshKey}
             project={project}
+            executionTarget={executionTarget}
             onRefreshInspection={onRefreshInspection}
             onSuccess={onSuccess}
             onError={onError}

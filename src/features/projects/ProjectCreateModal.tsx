@@ -3,6 +3,7 @@ import { Icon } from "../../shared/components/Icon";
 import { Modal } from "../../shared/components/Modal";
 import { useI18n } from "../../shared/i18n/I18n";
 import { getBuiltInProjectTemplates } from "../../shared/lib/projectTemplates";
+import { defaultExecutionTarget } from "../../shared/lib/execution";
 import { suggestBuildCommand, suggestDevPort, suggestRunCommand } from "../../shared/lib/projectRuntime";
 import { createId } from "../../shared/lib/storage";
 import {
@@ -115,7 +116,7 @@ export function ProjectCreateModal({
       setExistingPath(selected);
       setName((current) => current || folderName(selected, t("Neues Projekt", "New project")));
       setLoading(true);
-      const result = await inspectProject(selected);
+      const result = await inspectProject(selected, defaultExecutionTarget());
       setInspection(result);
     } catch (error) {
       onError(error instanceof Error ? error.message : String(error));
@@ -137,7 +138,7 @@ export function ProjectCreateModal({
     if (!existingPath.trim()) return;
     setLoading(true);
     try {
-      const result = await inspectProject(existingPath.trim());
+      const result = await inspectProject(existingPath.trim(), defaultExecutionTarget());
       setInspection(result);
     } catch (error) {
       onError(error instanceof Error ? error.message : String(error));
@@ -199,7 +200,7 @@ export function ProjectCreateModal({
           cloneBranch.trim() || undefined,
           shallowClone,
         );
-        const result = await inspectProject(created.path);
+        const result = await inspectProject(created.path, defaultExecutionTarget());
         const displayName = name.trim() || created.name;
         setName(displayName);
         onCreate(buildProject(created.path, result, displayName));
@@ -224,7 +225,7 @@ export function ProjectCreateModal({
       }
       setLoading(true);
       try {
-        const result = inspection ?? await inspectProject(existingPath.trim());
+        const result = inspection ?? await inspectProject(existingPath.trim(), defaultExecutionTarget());
         if (!result.exists) throw new Error(t("Der ausgewählte Projektordner wurde nicht gefunden.", "The selected project folder could not be found."));
         onCreate(buildProject(existingPath.trim(), result));
         onClose();
@@ -255,7 +256,7 @@ export function ProjectCreateModal({
         initGit,
         selectedBuiltIn?.id === "spring-boot" ? javaPackageBase.trim() : undefined,
       );
-      const result = await inspectProject(created.path);
+      const result = await inspectProject(created.path, defaultExecutionTarget());
       onCreate(buildProject(created.path, result));
       onClose();
     } catch (error) {

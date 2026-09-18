@@ -3,6 +3,7 @@ import { suggestBuildCommand, suggestDevPort, suggestRunCommand } from "./projec
 
 const STORAGE_KEY = "code-deck-data-v1";
 const NATIVE_SHELLS = ["platformDefault", "cmd", "powerShell7", "windowsPowerShell"] as const;
+const EXECUTION_RUNTIMES = ["windows", "wsl"] as const;
 
 const now = () => new Date().toISOString();
 
@@ -169,6 +170,11 @@ export function normalizeData(input: unknown, imported = false): AppData {
           commandShell: project.commandShell === "inherit" || NATIVE_SHELLS.includes(project.commandShell as typeof NATIVE_SHELLS[number])
             ? project.commandShell
             : undefined,
+          executionRuntime: EXECUTION_RUNTIMES.includes(project.executionRuntime as typeof EXECUTION_RUNTIMES[number])
+            ? project.executionRuntime
+            : undefined,
+          wslDistro: project.wslDistro?.trim() || undefined,
+          wslPath: project.wslPath?.trim() || undefined,
           commands: Array.isArray(project.commands)
             ? project.commands.map((command) => ({
                 ...normalizeCommand(command),

@@ -17,10 +17,11 @@ import {
   gitUnstageFiles,
   resolveGitConflict,
 } from "../../shared/lib/tauri";
-import type { GitConflictContent, GitFileStatus, GitRepositoryStatus, Project } from "../../shared/types/models";
+import type { ExecutionTarget, GitConflictContent, GitFileStatus, GitRepositoryStatus, Project } from "../../shared/types/models";
 
 type GitProjectPanelProps = {
   project: Project;
+  executionTarget: ExecutionTarget;
   onRefreshInspection: () => Promise<unknown>;
   onSuccess: (message: string) => void;
   onError: (message: string) => void;
@@ -39,7 +40,7 @@ function statusLabel(file: GitFileStatus) {
   return `${file.indexStatus}${file.workTreeStatus}`;
 }
 
-export function GitProjectPanel({ project, onRefreshInspection, onSuccess, onError }: GitProjectPanelProps) {
+export function GitProjectPanel({ project, executionTarget, onRefreshInspection, onSuccess, onError }: GitProjectPanelProps) {
   const { t, language } = useI18n();
   const [status, setStatus] = useState<GitRepositoryStatus>();
   const [branches, setBranches] = useState<string[]>([]);
@@ -70,8 +71,8 @@ export function GitProjectPanel({ project, onRefreshInspection, onSuccess, onErr
     setLoading(true);
     try {
       const [nextStatus, nextBranches] = await Promise.all([
-        getGitStatus(project.path),
-        getGitBranches(project.path),
+        getGitStatus(project.path, executionTarget),
+        getGitBranches(project.path, executionTarget),
       ]);
       setStatus(nextStatus);
       setBranches(nextBranches);
@@ -104,7 +105,7 @@ export function GitProjectPanel({ project, onRefreshInspection, onSuccess, onErr
     async function loadSelectedFile(file: GitFileStatus) {
       try {
         if (file.conflicted) {
-          const content = await getGitConflict(project.path, file.path);
+          const content = await getGitConflict(project.path, file.path, executionTarget);
           if (requestId !== diffRequestRef.current) return;
           setConflict(content);
           setResolution(content.workingTree);
@@ -113,7 +114,7 @@ export function GitProjectPanel({ project, onRefreshInspection, onSuccess, onErr
             staged: file.staged,
             unstaged: file.unstaged,
             untracked: file.untracked,
-          });
+          }, executionTarget);
           if (requestId !== diffRequestRef.current) return;
           setDiff(content || t("Für diese Datei ist kein Text-Diff verfügbar.", "No text diff is available for this file."));
         }
@@ -163,7 +164,7 @@ export function GitProjectPanel({ project, onRefreshInspection, onSuccess, onErr
       onError(t("Gib einen Branch-Namen ein.", "Enter a branch name."));
       return;
     }
-    await runAction("create-branch", () => gitCreateBranch(project.path, branch), t(`Branch ${branch} wurde erstellt.`, `Branch ${branch} was created.`));
+    await runAction("create-branch", () => gitCreateBranch(project.path, branch, executionTarget), t(`Branch ${branch} wurde erstellt.`, `Branch ${branch} was created.`));
     setNewBranch("");
   }
 
@@ -173,7 +174,7 @@ export function GitProjectPanel({ project, onRefreshInspection, onSuccess, onErr
       onError(t("Gib eine Commit-Nachricht ein.", "Enter a commit message."));
       return;
     }
-    await runAction("commit", () => gitCommit(project.path, message), t("Commit wurde erstellt.", "Commit created."));
+    await runAction("commit", () => gitCommit(project.path, message, executionTarget), t("Commit wurde erstellt.", "Commit created."));
     setCommitMessage("");
   }
 
@@ -185,7 +186,7 @@ export function GitProjectPanel({ project, onRefreshInspection, onSuccess, onErr
     }
     await runAction(
       `resolve:${conflict.path}`,
-      () => resolveGitConflict(project.path, conflict.path, resolution),
+      () => resolveGitConflict(project.path, conflict.path, resolution, executionTarget),
       t(`${conflict.path} wurde gespeichert und gestaged.`, `${conflict.path} was saved and staged.`),
     );
     setConflict(undefined);
@@ -202,7 +203,7 @@ export function GitProjectPanel({ project, onRefreshInspection, onSuccess, onErr
           className="button button--primary"
           type="button"
           disabled={Boolean(busyAction)}
-          onClick={() => void runAction("init", () => initializeGitRepository(project.path), t("Git-Repository wurde initialisiert.", "Git repository initialized."))}
+          onClick={() => void runAction("init", () => initializeGitRepository(project.path, executionTarget), t("Git-Repository wurde initialisiert.", "Git repository initialized."))}
         >
           <Icon name="git" />{t("Git initialisieren", "Initialize Git")}
         </button>
@@ -235,7 +236,7 @@ export function GitProjectPanel({ project, onRefreshInspection, onSuccess, onErr
             <select
               aria-label={t("Branch wechseln", "Switch branch")}
               value={status?.branch ?? ""}
-              onChange={(event) => void runAction("checkout", () => gitCheckoutBranch(project.path, event.target.value), t(`Zu ${event.target.value} gewechselt.`, `Switched to ${event.target.value}.`))}
+              onChange={(event) => void runAction("checkout", () => gitCheckoutBranch(project.path, event.target.value, executionTarget), t(`Zu ${event.target.value} gewechselt.`, `Switched to ${event.target.value}.`))}
               disabled={Boolean(busyAction)}
             >
               {!branches.includes(status?.branch ?? "") && status?.branch && <option value={status.branch}>{status.branch}</option>}
@@ -253,7 +254,7 @@ export function GitProjectPanel({ project, onRefreshInspection, onSuccess, onErr
                 className="button button--secondary button--small"
                 type="button"
                 disabled={Boolean(busyAction)}
-                onClick={() => void runAction(action, () => gitRemoteAction(project.path, action), t(`Git ${action} abgeschlossen.`, `Git ${action} completed.`))}
+                onClick={() => void runAction(action, () => gitRemoteAction(project.path, action, executionTarget), t(`Git ${action} abgeschlossen.`, `Git ${action} completed.`))}
               >
                 <Icon name={action === "push" ? "upload" : action === "pull" ? "download" : "refresh"} />{action[0].toUpperCase() + action.slice(1)}
               </button>
@@ -266,10 +267,10 @@ export function GitProjectPanel({ project, onRefreshInspection, onSuccess, onErr
             <Icon name="info" />
             <div><strong>{t(`Aktive Git-Operation: ${status.operation}`, `Active Git operation: ${status.operation}`)}</strong><small>{conflicts.length ? t("Löse zuerst alle Konflikte.", "Resolve all conflicts first.") : t("Alle Konflikte sind gelöst. Du kannst fortfahren.", "All conflicts are resolved. You can continue.")}</small></div>
             <div className="button-row">
-              <button className="button button--primary button--small" type="button" disabled={conflicts.length > 0 || Boolean(busyAction)} onClick={() => void runAction("continue", () => continueGitOperation(project.path), t("Git-Operation wurde fortgesetzt.", "Git operation continued."))}><Icon name="play" />{t("Fortsetzen", "Continue")}</button>
+              <button className="button button--primary button--small" type="button" disabled={conflicts.length > 0 || Boolean(busyAction)} onClick={() => void runAction("continue", () => continueGitOperation(project.path, executionTarget), t("Git-Operation wurde fortgesetzt.", "Git operation continued."))}><Icon name="play" />{t("Fortsetzen", "Continue")}</button>
               <button className="button button--danger button--small" type="button" disabled={Boolean(busyAction)} onClick={() => {
                 if (window.confirm(t(`Laufenden ${status.operation}-Vorgang wirklich abbrechen?`, `Abort the current ${status.operation} operation?`))) {
-                  void runAction("abort", () => abortGitOperation(project.path), t("Git-Operation wurde abgebrochen.", "Git operation aborted."));
+                  void runAction("abort", () => abortGitOperation(project.path, executionTarget), t("Git-Operation wurde abgebrochen.", "Git operation aborted."));
                 }
               }}><Icon name="x" />{t("Abbrechen", "Abort")}</button>
             </div>
@@ -298,9 +299,9 @@ export function GitProjectPanel({ project, onRefreshInspection, onSuccess, onErr
             {selectedFile && !selectedFile.conflicted && (
               <div className="button-row">
                 {selectedFile.staged ? (
-                  <button className="button button--ghost button--small" type="button" onClick={() => void runAction(`unstage:${selectedFile.path}`, () => gitUnstageFiles(project.path, [selectedFile.path]), t("Datei wurde aus dem Staging-Bereich entfernt.", "File was unstaged."))}><Icon name="arrow-down" />Unstage</button>
+                  <button className="button button--ghost button--small" type="button" onClick={() => void runAction(`unstage:${selectedFile.path}`, () => gitUnstageFiles(project.path, [selectedFile.path], executionTarget), t("Datei wurde aus dem Staging-Bereich entfernt.", "File was unstaged."))}><Icon name="arrow-down" />Unstage</button>
                 ) : (
-                  <button className="button button--primary button--small" type="button" onClick={() => void runAction(`stage:${selectedFile.path}`, () => gitStageFiles(project.path, [selectedFile.path]), t("Datei wurde gestaged.", "File was staged."))}><Icon name="arrow-up" />Stage</button>
+                  <button className="button button--primary button--small" type="button" onClick={() => void runAction(`stage:${selectedFile.path}`, () => gitStageFiles(project.path, [selectedFile.path], executionTarget), t("Datei wurde gestaged.", "File was staged."))}><Icon name="arrow-up" />Stage</button>
                 )}
               </div>
             )}

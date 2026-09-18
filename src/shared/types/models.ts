@@ -2,7 +2,15 @@ export type Theme = "dark" | "light" | "system";
 export type Language = "de" | "en";
 
 export type NativeShell = "platformDefault" | "cmd" | "powerShell7" | "windowsPowerShell";
-export type ExecutionTarget = { type: "native"; shell: NativeShell };
+export type ExecutionRuntime = "windows" | "wsl";
+export type ExecutionTarget =
+  | { type: "native"; shell: NativeShell }
+  | { type: "wsl"; distro: string; linuxPath: string };
+export type WslLocation = {
+  distro: string;
+  linuxPath: string;
+  hostPath: string;
+};
 export type CommandShellInfo = {
   id: Exclude<NativeShell, "platformDefault">;
   available: boolean;
@@ -116,6 +124,9 @@ export type Project = {
   runCommand?: string;
   devPort?: number;
   commandShell?: NativeShell | "inherit";
+  executionRuntime?: ExecutionRuntime;
+  wslDistro?: string;
+  wslPath?: string;
 };
 
 export type BuiltInProjectTemplateId =

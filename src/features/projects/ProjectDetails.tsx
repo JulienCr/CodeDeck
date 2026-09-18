@@ -6,10 +6,12 @@ import { Modal } from "../../shared/components/Modal";
 import { useI18n } from "../../shared/i18n/I18n";
 import { createId } from "../../shared/lib/storage";
 import { getDetectedTechnologies } from "../../shared/lib/projectInspection";
-import { nativeShellLabel, resolveNativeShell } from "../../shared/lib/execution";
+import { executionTargetLabel, nativeShellLabel, resolveExecutionTarget } from "../../shared/lib/execution";
+import { resolveWslLocation } from "../../shared/lib/tauri";
 import type {
   CommandShellInfo,
   Editor,
+  ExecutionRuntime,
   NativeShell,
   Project,
   ProjectCommand,
@@ -21,6 +23,7 @@ type ProjectDetailsProps = {
   editors: Editor[];
   githubToken: string;
   commandShells: CommandShellInfo[];
+  wslDistros: string[];
   globalCommandShell: NativeShell;
   onClose: () => void;
   onUpdate: (project: Project) => void;
@@ -46,6 +49,7 @@ export function ProjectDetails({
   editors,
   githubToken,
   commandShells,
+  wslDistros,
   globalCommandShell,
   onClose,
   onUpdate,
@@ -70,7 +74,17 @@ export function ProjectDetails({
   const [editingCommandId, setEditingCommandId] = useState<string>();
   const [refreshing, setRefreshing] = useState(false);
   const [draft, setDraft] = useState<Project>();
-  const [runtimeDraft, setRuntimeDraft] = useState<{ buildCommand: string; runCommand: string; devPort: string; commandShell: NativeShell | "inherit" }>({ buildCommand: "", runCommand: "", devPort: "", commandShell: "inherit" });
+  const [runtimeDraft, setRuntimeDraft] = useState<{
+    buildCommand: string;
+    runCommand: string;
+    devPort: string;
+    commandShell: NativeShell | "inherit";
+    executionRuntime: ExecutionRuntime;
+    wslDistro: string;
+    wslPath: string;
+  }>({ buildCommand: "", runCommand: "", devPort: "", commandShell: "inherit", executionRuntime: "windows", wslDistro: "", wslPath: "" });
+  const [detectingWslLocation, setDetectingWslLocation] = useState(false);
+  const [wslHostPath, setWslHostPath] = useState<string>();
 
   useEffect(() => {
     setTab("overview");
@@ -86,6 +100,9 @@ export function ProjectDetails({
       runCommand: project?.runCommand ?? "",
       devPort: project?.devPort ? String(project.devPort) : "",
       commandShell: project?.commandShell ?? "inherit",
+      executionRuntime: project?.executionRuntime ?? "windows",
+      wslDistro: project?.wslDistro ?? "",
+      wslPath: project?.wslPath ?? "",
     });
   }, [project]);
 
@@ -101,7 +118,7 @@ export function ProjectDetails({
   const detectedLanguages = technologies.filter((entry) => entry.kind === "language").map((entry) => entry.label);
   const detectedFrameworks = technologies.filter((entry) => entry.kind === "framework").map((entry) => entry.label);
   const detectedTools = technologies.filter((entry) => entry.kind === "tool").map((entry) => entry.label);
-  const effectiveCommandShell = resolveNativeShell(currentProject, { commandShell: globalCommandShell });
+  const currentExecutionTarget = resolveExecutionTarget(currentProject, { commandShell: globalCommandShell });
   const globalShellName = nativeShellLabel(t, globalCommandShell);
 
   function saveCommand(event: React.FormEvent) {
@@ -159,6 +176,19 @@ export function ProjectDetails({
     }
   }
 
+  async function detectWslLocation() {
+    setDetectingWslLocation(true);
+    try {
+      const location = await resolveWslLocation(currentProject.path, runtimeDraft.wslDistro || undefined);
+      setRuntimeDraft((current) => ({ ...current, wslDistro: location.distro, wslPath: location.linuxPath }));
+      setWslHostPath(location.hostPath);
+    } catch (error) {
+      onError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setDetectingWslLocation(false);
+    }
+  }
+
   function saveProject(event: React.FormEvent) {
     event.preventDefault();
     if (!currentDraft.name.trim() || !currentDraft.path.trim()) {
@@ -181,6 +211,9 @@ export function ProjectDetails({
       runCommand: runtimeDraft.runCommand.trim(),
       devPort: port,
       commandShell: runtimeDraft.commandShell === "inherit" ? undefined : runtimeDraft.commandShell,
+      executionRuntime: runtimeDraft.executionRuntime === "wsl" ? "wsl" : undefined,
+      wslDistro: runtimeDraft.wslDistro.trim() || undefined,
+      wslPath: runtimeDraft.wslPath.trim() || undefined,
       updatedAt: new Date().toISOString(),
     });
     onSuccess(t("Build-, Run- und Port-Einstellungen wurden gespeichert.", "Build, run and port settings were saved."));
@@ -211,8 +244,8 @@ export function ProjectDetails({
                 {technologies.slice(0, 8).map((technology) => (
                   <span className={`badge badge--${technology.kind}`} key={`${technology.kind}:${technology.label}`}><i aria-hidden="true" />{technology.label}</span>
                 ))}
-                {commandShells.length > 0 && effectiveCommandShell !== "platformDefault" && (
-                  <span className="badge badge--muted">Windows · {nativeShellLabel(t, effectiveCommandShell)}</span>
+                {(currentExecutionTarget.type !== "native" || currentExecutionTarget.shell !== "platformDefault") && (
+                  <span className="badge badge--muted">{executionTargetLabel(t, currentExecutionTarget)}</span>
                 )}
               </div>
             </div>
@@ -320,7 +353,7 @@ export function ProjectDetails({
                   <div className="form-field"><label htmlFor="runtime-build-command">{t("Build-Command", "Build command")}</label><input id="runtime-build-command" value={runtimeDraft.buildCommand} onChange={(event) => setRuntimeDraft({ ...runtimeDraft, buildCommand: event.target.value })} placeholder="pnpm build" /></div>
                   <div className="form-field"><label htmlFor="runtime-run-command">{t("Run-Command", "Run command")}</label><input id="runtime-run-command" value={runtimeDraft.runCommand} onChange={(event) => setRuntimeDraft({ ...runtimeDraft, runCommand: event.target.value })} placeholder="pnpm dev -- --port {port}" /><small>{t("Nutze optional {port}. Zusätzlich setzt Code Deck PORT, SERVER_PORT und VITE_PORT.", "Optionally use {port}. Code Deck also sets PORT, SERVER_PORT and VITE_PORT.")}</small></div>
                   <div className="form-field"><label htmlFor="runtime-port">{t("Entwicklungs-Port", "Development port")}</label><input id="runtime-port" inputMode="numeric" value={runtimeDraft.devPort} onChange={(event) => setRuntimeDraft({ ...runtimeDraft, devPort: event.target.value.replace(/\D/g, "") })} placeholder="5173" /></div>
-                  {commandShells.length > 0 && (
+                  {runtimeDraft.executionRuntime === "windows" && commandShells.length > 0 && (
                     <div className="form-field">
                       <label htmlFor="runtime-command-shell">{t("Befehlsshell", "Command shell")}</label>
                       <select id="runtime-command-shell" value={runtimeDraft.commandShell} onChange={(event) => setRuntimeDraft({ ...runtimeDraft, commandShell: event.target.value as NativeShell | "inherit" })}>
@@ -330,6 +363,56 @@ export function ProjectDetails({
                     </div>
                   )}
                 </div>
+
+                {wslDistros.length > 0 && (
+                  <>
+                  <p className="eyebrow">{t("Ausführungsumgebung", "Execution environment")}</p>
+                  <div className="form-grid runtime-form-grid">
+                    <div className="form-field">
+                      <label htmlFor="runtime-execution-runtime">{t("Laufzeit", "Runtime")}</label>
+                      <select
+                        id="runtime-execution-runtime"
+                        value={runtimeDraft.executionRuntime}
+                        onChange={(event) => setRuntimeDraft({ ...runtimeDraft, executionRuntime: event.target.value as ExecutionRuntime })}
+                      >
+                        <option value="windows">{t("Windows", "Windows")}</option>
+                        <option value="wsl">WSL</option>
+                      </select>
+                    </div>
+                    {runtimeDraft.executionRuntime === "wsl" && (
+                      <>
+                        <div className="form-field">
+                          <label htmlFor="runtime-wsl-distro">{t("Distribution", "Distribution")}</label>
+                          <select
+                            id="runtime-wsl-distro"
+                            value={runtimeDraft.wslDistro}
+                            onChange={(event) => setRuntimeDraft({ ...runtimeDraft, wslDistro: event.target.value })}
+                          >
+                            <option value="">{t("Auswählen", "Select")}</option>
+                            {wslDistros.map((distro) => <option key={distro} value={distro}>{distro}</option>)}
+                          </select>
+                        </div>
+                        <div className="form-field">
+                          <label htmlFor="runtime-wsl-path">{t("Linux-Projektpfad", "Linux project path")}</label>
+                          <div className="input-action-row">
+                            <input
+                              id="runtime-wsl-path"
+                              value={runtimeDraft.wslPath}
+                              onChange={(event) => setRuntimeDraft({ ...runtimeDraft, wslPath: event.target.value })}
+                              placeholder="/home/julien/dev/foo"
+                            />
+                            <button className="button button--secondary" type="button" onClick={() => void detectWslLocation()} disabled={detectingWslLocation}>
+                              <Icon name="search" />{detectingWslLocation ? t("Ermittle…", "Detecting…") : t("Ermitteln", "Detect")}
+                            </button>
+                          </div>
+                          {wslHostPath && <small>{t("IDE und Explorer öffnen", "IDE and Explorer open")} {wslHostPath}</small>}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                  </>
+                )}
+
                 <div className="form-actions"><button className="button button--secondary" type="submit"><Icon name="check" />{t("Run-Konfiguration speichern", "Save run configuration")}</button></div>
               </form>
               <section className="panel panel--wide">
@@ -366,6 +449,7 @@ export function ProjectDetails({
           {tab === "git" && (
             <GitProjectPanel
               project={project}
+              executionTarget={currentExecutionTarget}
               onRefreshInspection={() => onRefreshInspection(project)}
               onSuccess={onSuccess}
               onError={onError}
@@ -375,6 +459,7 @@ export function ProjectDetails({
           {tab === "github" && (
             <GitHubProjectPanel
               project={project}
+              executionTarget={currentExecutionTarget}
               token={githubToken}
               onOpenGitHubSettings={onOpenGitHubSettings}
               onRefreshInspection={() => onRefreshInspection(project)}

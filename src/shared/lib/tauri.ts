@@ -13,6 +13,7 @@ import type {
   ProcessOutputEvent,
   ProjectCandidate,
   ProjectInspection,
+  WslLocation,
 } from "../types/models";
 
 export const isTauri = () =>
@@ -80,8 +81,14 @@ export const createProjectFromTemplate = (
     javaPackageBase: javaPackageBase || null,
   });
 
-export const inspectProject = (path: string) =>
-  call<ProjectInspection>("inspect_project", { path });
+export const inspectProject = (path: string, executionTarget: ExecutionTarget) =>
+  call<ProjectInspection>("inspect_project", { path, executionTarget });
+
+export const detectWslDistros = () =>
+  call<string[]>("detect_wsl_distros");
+
+export const resolveWslLocation = (path: string, distro?: string) =>
+  call<WslLocation>("resolve_wsl_location", { path, distro: distro || null });
 
 export const cloneRepository = (
   repositoryUrl: string,
@@ -98,53 +105,54 @@ export const cloneRepository = (
     shallow,
   });
 
-export const initializeGitRepository = (projectPath: string) =>
-  call<void>("git_init_repository", { projectPath });
+export const initializeGitRepository = (projectPath: string, executionTarget: ExecutionTarget) =>
+  call<void>("git_init_repository", { projectPath, executionTarget });
 
-export const getGitStatus = (projectPath: string) =>
-  call<GitRepositoryStatus>("git_status", { projectPath });
+export const getGitStatus = (projectPath: string, executionTarget: ExecutionTarget) =>
+  call<GitRepositoryStatus>("git_status", { projectPath, executionTarget });
 
-export const getGitBranches = (projectPath: string) =>
-  call<string[]>("git_branches", { projectPath });
+export const getGitBranches = (projectPath: string, executionTarget: ExecutionTarget) =>
+  call<string[]>("git_branches", { projectPath, executionTarget });
 
 export const getGitDiff = (
   projectPath: string,
   filePath: string,
   state: { staged: boolean; unstaged: boolean; untracked: boolean },
-) => call<string>("git_diff", { projectPath, filePath, ...state });
+  executionTarget: ExecutionTarget,
+) => call<string>("git_diff", { projectPath, filePath, ...state, executionTarget });
 
-export const gitStageFiles = (projectPath: string, paths: string[]) =>
-  call<void>("git_stage", { projectPath, paths });
+export const gitStageFiles = (projectPath: string, paths: string[], executionTarget: ExecutionTarget) =>
+  call<void>("git_stage", { projectPath, paths, executionTarget });
 
-export const gitUnstageFiles = (projectPath: string, paths: string[]) =>
-  call<void>("git_unstage", { projectPath, paths });
+export const gitUnstageFiles = (projectPath: string, paths: string[], executionTarget: ExecutionTarget) =>
+  call<void>("git_unstage", { projectPath, paths, executionTarget });
 
-export const gitCommit = (projectPath: string, message: string) =>
-  call<void>("git_commit", { projectPath, message });
+export const gitCommit = (projectPath: string, message: string, executionTarget: ExecutionTarget) =>
+  call<void>("git_commit", { projectPath, message, executionTarget });
 
-export const gitCheckoutBranch = (projectPath: string, branch: string) =>
-  call<void>("git_checkout_branch", { projectPath, branch });
+export const gitCheckoutBranch = (projectPath: string, branch: string, executionTarget: ExecutionTarget) =>
+  call<void>("git_checkout_branch", { projectPath, branch, executionTarget });
 
-export const gitCreateBranch = (projectPath: string, branch: string) =>
-  call<void>("git_create_branch", { projectPath, branch });
+export const gitCreateBranch = (projectPath: string, branch: string, executionTarget: ExecutionTarget) =>
+  call<void>("git_create_branch", { projectPath, branch, executionTarget });
 
-export const gitRemoteAction = (projectPath: string, action: "fetch" | "pull" | "push") =>
-  call<string>("git_remote_action", { projectPath, action });
+export const gitRemoteAction = (projectPath: string, action: "fetch" | "pull" | "push", executionTarget: ExecutionTarget) =>
+  call<string>("git_remote_action", { projectPath, action, executionTarget });
 
-export const getGitRemoteUrl = (projectPath: string) =>
-  call<string | null>("git_remote_url", { projectPath });
+export const getGitRemoteUrl = (projectPath: string, executionTarget: ExecutionTarget) =>
+  call<string | null>("git_remote_url", { projectPath, executionTarget });
 
-export const getGitConflict = (projectPath: string, filePath: string) =>
-  call<GitConflictContent>("git_conflict_content", { projectPath, filePath });
+export const getGitConflict = (projectPath: string, filePath: string, executionTarget: ExecutionTarget) =>
+  call<GitConflictContent>("git_conflict_content", { projectPath, filePath, executionTarget });
 
-export const resolveGitConflict = (projectPath: string, filePath: string, contents: string) =>
-  call<void>("git_resolve_conflict", { projectPath, filePath, contents });
+export const resolveGitConflict = (projectPath: string, filePath: string, contents: string, executionTarget: ExecutionTarget) =>
+  call<void>("git_resolve_conflict", { projectPath, filePath, contents, executionTarget });
 
-export const continueGitOperation = (projectPath: string) =>
-  call<void>("git_continue_operation", { projectPath });
+export const continueGitOperation = (projectPath: string, executionTarget: ExecutionTarget) =>
+  call<void>("git_continue_operation", { projectPath, executionTarget });
 
-export const abortGitOperation = (projectPath: string) =>
-  call<void>("git_abort_operation", { projectPath });
+export const abortGitOperation = (projectPath: string, executionTarget: ExecutionTarget) =>
+  call<void>("git_abort_operation", { projectPath, executionTarget });
 
 export const scanProjects = (path: string) =>
   call<ProjectCandidate[]>("scan_projects", { path });
@@ -200,8 +208,8 @@ export const startProcess = (
     executionTarget: executionTarget || null,
   });
 
-export const stopProcess = (pid: number) =>
-  call<void>("stop_process", { pid });
+export const stopProcess = (runId: string, pid: number) =>
+  call<void>("stop_process", { runId, pid });
 
 export const readTextFile = (path: string) =>
   call<string>("read_text_file", { path });
