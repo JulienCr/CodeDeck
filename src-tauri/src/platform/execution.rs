@@ -186,9 +186,12 @@ fn build_windows_native_command(
     command
         .args(powershell_arguments(script))
         .current_dir(working_dir)
-        .envs(env)
+        // Defaults first, `env` last: a user-configured PYTHONUTF8 must win,
+        // matching the pre-PR order where `.envs()` was applied after this
+        // command was built.
         .env("PYTHONUTF8", "1")
-        .env("PYTHONIOENCODING", "utf-8");
+        .env("PYTHONIOENCODING", "utf-8")
+        .envs(env);
     hide_console_window(&mut command);
     Ok(command)
 }
@@ -216,14 +219,19 @@ fn build_wsl_command(
         ));
     }
 
-    // Unlike native, an invalid name here would break the `NAME=VALUE` argv
-    // element on the Linux side, so it is rejected instead of passed through.
+    // Unlike native, an invalid name here could corrupt the `WSLENV` list on
+    // the Linux side, so it is rejected instead of passed through.
     let env = wsl::validated_env(env)?;
 
     let mut command = Command::new("wsl.exe");
-    command.args(wsl::wsl_execution_arguments(
-        distro, linux_path, &env, script,
-    ));
+    command.args(wsl::wsl_execution_arguments(distro, linux_path, script));
+    let (pairs, wslenv) = wsl::wsl_env_assignment(&env);
+    for (name, value) in &pairs {
+        command.env(name, value);
+    }
+    if let Some(wslenv) = wslenv {
+        command.env("WSLENV", wslenv);
+    }
     hide_console_window(&mut command);
     Ok(command)
 }
@@ -480,7 +488,7 @@ pwsh.exe wurde nicht gefunden. Wähle in den Einstellungen eine andere Command-S
         }
 
         #[test]
-        fn build_execution_command_for_wsl_propagates_env() {
+        fn build_execution_command_for_wsl_sets_env_via_command_env_and_wslenv() {
             let target = ExecutionTarget::Wsl {
                 distro: "Ubuntu".to_string(),
                 linux_path: "/home/julien".to_string(),
@@ -495,8 +503,17 @@ pwsh.exe wurde nicht gefunden. Wähle in den Einstellungen eine andere Command-S
                 .get_args()
                 .map(|value| value.to_string_lossy().into_owned())
                 .collect();
-            assert!(args.contains(&"PORT=5173".to_string()));
-            assert_eq!(command.get_envs().count(), 0);
+            assert!(
+                !args.iter().any(|value| value.contains("PORT")),
+                "a configured variable must never sit in the command line: {args:?}"
+            );
+            assert!(command.get_envs().any(|(name, value)| {
+                name == std::ffi::OsStr::new("PORT") && value == Some(std::ffi::OsStr::new("5173"))
+            }));
+            assert!(command.get_envs().any(|(name, value)| {
+                name == std::ffi::OsStr::new("WSLENV")
+                    && value == Some(std::ffi::OsStr::new("PORT"))
+            }));
         }
 
         #[test]

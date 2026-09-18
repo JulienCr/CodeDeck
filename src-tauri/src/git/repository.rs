@@ -32,7 +32,12 @@ fn native_git_command(root: &Path, args: &[&str]) -> Result<Command, String> {
 }
 
 #[cfg(target_os = "windows")]
-fn wsl_git_command(distro: &str, linux_path: &str, args: &[&str]) -> Result<Command, String> {
+fn wsl_git_command(
+    root: &Path,
+    distro: &str,
+    linux_path: &str,
+    args: &[&str],
+) -> Result<Command, String> {
     let distro = distro.trim();
     let linux_path = linux_path.trim();
     if distro.is_empty() || linux_path.is_empty() {
@@ -48,37 +53,52 @@ fn wsl_git_command(distro: &str, linux_path: &str, args: &[&str]) -> Result<Comm
             detail,
         ));
     }
+    wsl::ensure_wsl_paths_agree(root, distro, linux_path)?;
+
     let mut command = Command::new("wsl.exe");
-    command.args(wsl::wsl_git_arguments(
-        distro,
-        linux_path,
-        &GIT_ENV_VARS,
-        args,
-    ));
+    command.args(wsl::wsl_git_arguments(distro, linux_path, args));
+    for (name, value) in GIT_ENV_VARS {
+        command.env(name, value);
+    }
+    if let Some(wslenv) = wsl::wslenv_join(GIT_ENV_VARS.iter().map(|(name, _)| *name)) {
+        command.env("WSLENV", wslenv);
+    }
     hide_console_window(&mut command);
     Ok(command)
 }
 
 #[cfg(not(target_os = "windows"))]
-fn wsl_git_command(_distro: &str, _linux_path: &str, _args: &[&str]) -> Result<Command, String> {
+fn wsl_git_command(
+    _root: &Path,
+    _distro: &str,
+    _linux_path: &str,
+    _args: &[&str],
+) -> Result<Command, String> {
     Err("WSL ist nur unter Windows verfügbar.".to_string())
 }
 
-// Native's working directory is `root`; WSL's is the target's own
-// `linux_path` via `--cd`, so `root` (which may be a host UNC path) is never
-// passed to it.
+// Native's working directory is `root`; WSL's is `linux_path` via `--cd`.
+// `root` is still passed to `wsl_git_command`, not as a working directory,
+// but so the two paths can be checked against each other.
 fn git_command(target: &ExecutionTarget, root: &Path, args: &[&str]) -> Result<Command, String> {
     match target {
         ExecutionTarget::Native { .. } => native_git_command(root, args),
-        ExecutionTarget::Wsl { distro, linux_path } => wsl_git_command(distro, linux_path, args),
+        ExecutionTarget::Wsl { distro, linux_path } => {
+            wsl_git_command(root, distro, linux_path, args)
+        }
     }
 }
 
+// git always emits UTF-8 on stdout, on every target, so the WSL UTF-16LE
+// heuristic never applies here — it exists only for wsl.exe's own
+// diagnostics, which land on stderr.
+fn decode_git_stdout(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).trim().to_string()
+}
+
 #[cfg(target_os = "windows")]
-fn decode_git_output(target: &ExecutionTarget, bytes: &[u8]) -> String {
+fn decode_git_stderr(target: &ExecutionTarget, bytes: &[u8]) -> String {
     if matches!(target, ExecutionTarget::Wsl { .. }) {
-        // git inside WSL emits UTF-8, but wsl.exe's own failures are
-        // UTF-16LE, so the mixed decoder is needed only on this path.
         wsl::decode_wsl_output(bytes).trim().to_string()
     } else {
         String::from_utf8_lossy(bytes).trim().to_string()
@@ -86,7 +106,7 @@ fn decode_git_output(target: &ExecutionTarget, bytes: &[u8]) -> String {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn decode_git_output(_target: &ExecutionTarget, bytes: &[u8]) -> String {
+fn decode_git_stderr(_target: &ExecutionTarget, bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).trim().to_string()
 }
 
@@ -125,7 +145,7 @@ pub(crate) fn git_output(target: &ExecutionTarget, root: &Path, args: &[&str]) -
     output
         .status
         .success()
-        .then(|| decode_git_output(target, &output.stdout))
+        .then(|| decode_git_stdout(&output.stdout))
 }
 
 pub(crate) fn run_git(
@@ -143,8 +163,8 @@ pub(crate) fn run_git(
         .output()
         .map_err(|error| format!("Git konnte nicht gestartet werden: {error}"))?;
 
-    let stdout = decode_git_output(target, &output.stdout);
-    let stderr = decode_git_output(target, &output.stderr);
+    let stdout = decode_git_stdout(&output.stdout);
+    let stderr = decode_git_stderr(target, &output.stderr);
 
     if output.status.success() {
         return Ok(if stdout.is_empty() { stderr } else { stdout });
@@ -296,5 +316,19 @@ pub(crate) fn read_git_stage(
     match String::from_utf8(output.stdout) {
         Ok(value) => Ok((Some(value), false)),
         Err(_) => Ok((None, true)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Regression guard for the mojibake bug: `decode_wsl_output`'s UTF-16LE
+    // heuristic reads this exact `git status --short -z` shape as UTF-16LE
+    // (even length, NUL at an odd index) unless stdout skips it entirely.
+    #[test]
+    fn git_status_short_z_stdout_survives_byte_for_byte() {
+        let bytes: &[u8] = b"?? file.txt\0 M src/main.rs\0";
+        assert_eq!(decode_git_stdout(bytes).as_bytes(), bytes);
     }
 }

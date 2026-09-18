@@ -1,5 +1,6 @@
 use crate::platform::launchers::hide_console_window;
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 const WSL_SHELL: &str = "bash";
@@ -18,9 +19,11 @@ pub(crate) fn decode_wsl_output(bytes: &[u8]) -> String {
         return String::from_utf8_lossy(bytes).into_owned();
     }
 
-    let units: Vec<u16> = bytes
-        .chunks_exact(2)
-        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+    // Indexing rather than `chunks_exact(2)`/`as_chunks`: the former trips
+    // `clippy::chunks_exact_to_as_chunks` on CI's newer Windows toolchain,
+    // the latter is not stable on the older one ubuntu/macOS build with.
+    let units: Vec<u16> = (0..bytes.len() / 2)
+        .map(|i| u16::from_le_bytes([bytes[i * 2], bytes[i * 2 + 1]]))
         .collect();
     String::from_utf16_lossy(&units)
 }
@@ -98,8 +101,9 @@ pub(crate) fn is_valid_env_name(name: &str) -> bool {
 }
 
 /// Native accepts whatever env name the host shell tolerates, so an existing
-/// project keeps working; only the WSL path (where names become independent
-/// `env` argv elements) rejects one that would not parse as `NAME=VALUE`.
+/// project keeps working; only the WSL path (where names are set through
+/// `Command::env` and listed in `WSLENV`) rejects one that is not a valid
+/// shell identifier — a name containing `:` would corrupt the `WSLENV` list.
 pub(crate) fn validated_env(
     env: &BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, String>, String> {
@@ -142,56 +146,85 @@ pub(crate) fn wsl_working_directory(
 }
 
 /// Argv after the program name. `--exec` re-parses nothing through the
-/// user's login shell, unlike a bare `--`; env pairs are independent argv
-/// elements, never interpolated into `script`, so no value can break out.
-pub(crate) fn wsl_execution_arguments(
-    distro: &str,
-    linux_path: &str,
-    env: &BTreeMap<String, String>,
-    script: &str,
-) -> Vec<String> {
+/// user's login shell, unlike a bare `--`. Configured variables are set
+/// through `Command::env`/`WSLENV` rather than argv, so they never sit in
+/// `wsl.exe`'s own command line, which any process on the session can read.
+pub(crate) fn wsl_execution_arguments(distro: &str, linux_path: &str, script: &str) -> Vec<String> {
+    vec![
+        "-d".to_string(),
+        distro.to_string(),
+        "--cd".to_string(),
+        linux_path.to_string(),
+        "--exec".to_string(),
+        WSL_SHELL.to_string(),
+        "-lc".to_string(),
+        script.to_string(),
+    ]
+}
+
+/// Argv for a git invocation. `--exec` runs `git` directly, never a login
+/// shell, so a caller-supplied `--` (e.g. `git add -- file`) reaches git
+/// verbatim instead of being mistaken for the `wsl.exe` separator. Env is
+/// applied through `Command::env`/`WSLENV`, not as argv, for the same reason
+/// as `wsl_execution_arguments`.
+pub(crate) fn wsl_git_arguments(distro: &str, linux_path: &str, args: &[&str]) -> Vec<String> {
     let mut arguments = vec![
         "-d".to_string(),
         distro.to_string(),
         "--cd".to_string(),
         linux_path.to_string(),
         "--exec".to_string(),
+        "git".to_string(),
     ];
-
-    if !env.is_empty() {
-        arguments.push("env".to_string());
-        for (name, value) in env {
-            arguments.push(format!("{name}={value}"));
-        }
-    }
-
-    arguments.push(WSL_SHELL.to_string());
-    arguments.push("-lc".to_string());
-    arguments.push(script.to_string());
+    arguments.extend(args.iter().map(|value| value.to_string()));
     arguments
 }
 
-/// Argv for a git invocation. `--exec` runs `env` then `git` directly, never
-/// a login shell, so a caller-supplied `--` (e.g. `git add -- file`) reaches
-/// git verbatim instead of being mistaken for the `wsl.exe` separator.
-pub(crate) fn wsl_git_arguments(
+/// Joins env-var names for `WSLENV`. Iterating a `BTreeMap`'s keys yields
+/// them sorted; an empty input yields no assignment rather than an empty one.
+pub(crate) fn wslenv_join<'a>(names: impl Iterator<Item = &'a str>) -> Option<String> {
+    let names: Vec<&str> = names.collect();
+    (!names.is_empty()).then(|| names.join(":"))
+}
+
+/// Turns a validated variable map into the `Command::env` pairs to set and
+/// the `WSLENV` value that carries them into the child, so a configured
+/// variable is set on the process rather than passed on its command line.
+pub(crate) fn wsl_env_assignment(
+    env: &BTreeMap<String, String>,
+) -> (Vec<(String, String)>, Option<String>) {
+    let pairs: Vec<(String, String)> = env
+        .iter()
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect();
+    let wslenv = wslenv_join(env.keys().map(String::as_str));
+    (pairs, wslenv)
+}
+
+/// `linuxPath` is free text and can drift from the project's stored UNC host
+/// path; git would then index a different repository than the one the host
+/// side inspects. A non-WSL host path (e.g. `/mnt/c/...`) is not compared —
+/// checking it would cost a `wslpath` spawn per git call.
+pub(crate) fn ensure_wsl_paths_agree(
+    host_path: &Path,
     distro: &str,
     linux_path: &str,
-    env: &[(&str, &str)],
-    args: &[&str],
-) -> Vec<String> {
-    let mut arguments = vec![
-        "-d".to_string(),
-        distro.to_string(),
-        "--cd".to_string(),
-        linux_path.to_string(),
-        "--exec".to_string(),
-        "env".to_string(),
-    ];
-    arguments.extend(env.iter().map(|(name, value)| format!("{name}={value}")));
-    arguments.push("git".to_string());
-    arguments.extend(args.iter().map(|value| value.to_string()));
-    arguments
+) -> Result<(), String> {
+    let host_path_display = host_path.to_string_lossy();
+    let Some((host_distro, host_linux_path)) = parse_wsl_unc_path(&host_path_display) else {
+        return Ok(());
+    };
+    if host_distro.eq_ignore_ascii_case(distro) && host_linux_path == linux_path {
+        return Ok(());
+    }
+    Err(wsl_error_message(
+        "Git konnte nicht ausgeführt werden.",
+        distro,
+        linux_path,
+        &format!(
+            "Der Projektpfad ({host_path_display}) und der hinterlegte Linux-Pfad ({linux_path}) zeigen auf unterschiedliche Verzeichnisse. Korrigiere den Linux-Pfad in den Projekteinstellungen."
+        ),
+    ))
 }
 
 pub(crate) fn wsl_test_path_arguments(distro: &str, path: &str) -> Vec<String> {
@@ -469,12 +502,7 @@ mod tests {
 
     #[test]
     fn wsl_execution_arguments_builds_a_plain_script() {
-        let args = wsl_execution_arguments(
-            "Ubuntu",
-            "/home/julien/dev/foo",
-            &BTreeMap::new(),
-            "pnpm dev",
-        );
+        let args = wsl_execution_arguments("Ubuntu", "/home/julien/dev/foo", "pnpm dev");
         assert_eq!(
             args,
             vec![
@@ -493,34 +521,110 @@ mod tests {
     }
 
     #[test]
-    fn wsl_execution_arguments_sorts_env_between_exec_and_bash() {
-        let mut env = BTreeMap::new();
-        env.insert("PORT".to_string(), "5173".to_string());
-        env.insert("FOO".to_string(), "bar".to_string());
-        let args = wsl_execution_arguments("Ubuntu", "/home/julien", &env, "pnpm dev");
+    fn wsl_execution_arguments_keeps_a_quoted_script_as_one_element() {
+        let script = r#"pnpm run "say \"hi\"""#;
+        let args = wsl_execution_arguments("Ubuntu", "/home/julien", script);
+        assert_eq!(args.last().unwrap(), script);
+    }
+
+    #[test]
+    fn wslenv_join_returns_none_for_no_names() {
+        assert_eq!(wslenv_join(std::iter::empty()), None);
+    }
+
+    #[test]
+    fn wslenv_join_returns_the_single_name() {
+        assert_eq!(wslenv_join(["PORT"].into_iter()), Some("PORT".to_string()));
+    }
+
+    #[test]
+    fn wslenv_join_joins_multiple_names_with_a_colon() {
         assert_eq!(
-            args,
-            vec![
-                "-d".to_string(),
-                "Ubuntu".to_string(),
-                "--cd".to_string(),
-                "/home/julien".to_string(),
-                "--exec".to_string(),
-                "env".to_string(),
-                "FOO=bar".to_string(),
-                "PORT=5173".to_string(),
-                "bash".to_string(),
-                "-lc".to_string(),
-                "pnpm dev".to_string(),
-            ]
+            wslenv_join(["FOO", "PORT"].into_iter()),
+            Some("FOO:PORT".to_string())
         );
     }
 
     #[test]
-    fn wsl_execution_arguments_keeps_a_quoted_script_as_one_element() {
-        let script = r#"pnpm run "say \"hi\"""#;
-        let args = wsl_execution_arguments("Ubuntu", "/home/julien", &BTreeMap::new(), script);
-        assert_eq!(args.last().unwrap(), script);
+    fn wsl_env_assignment_empty_map_yields_no_pairs_and_no_wslenv() {
+        assert_eq!(wsl_env_assignment(&BTreeMap::new()), (Vec::new(), None));
+    }
+
+    #[test]
+    fn wsl_env_assignment_single_variable_yields_just_its_name() {
+        let mut env = BTreeMap::new();
+        env.insert("PORT".to_string(), "5173".to_string());
+        assert_eq!(
+            wsl_env_assignment(&env),
+            (
+                vec![("PORT".to_string(), "5173".to_string())],
+                Some("PORT".to_string())
+            )
+        );
+    }
+
+    #[test]
+    fn wsl_env_assignment_joins_names_in_sorted_order() {
+        let mut env = BTreeMap::new();
+        env.insert("PORT".to_string(), "5173".to_string());
+        env.insert("FOO".to_string(), "bar".to_string());
+        let (_, wslenv) = wsl_env_assignment(&env);
+        assert_eq!(wslenv, Some("FOO:PORT".to_string()));
+    }
+
+    #[test]
+    fn ensure_wsl_paths_agree_accepts_a_matching_unc_pair() {
+        assert_eq!(
+            ensure_wsl_paths_agree(
+                Path::new(r"\\wsl.localhost\Ubuntu\home\julien\dev\foo"),
+                "Ubuntu",
+                "/home/julien/dev/foo",
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn ensure_wsl_paths_agree_rejects_a_mismatched_linux_path() {
+        let error = ensure_wsl_paths_agree(
+            Path::new(r"\\wsl.localhost\Ubuntu\home\julien\dev\foo"),
+            "Ubuntu",
+            "/home/julien/dev/bar",
+        )
+        .unwrap_err();
+        assert!(error.contains(r"\\wsl.localhost\Ubuntu\home\julien\dev\foo"));
+        assert!(error.contains("/home/julien/dev/bar"));
+    }
+
+    #[test]
+    fn ensure_wsl_paths_agree_rejects_a_mismatched_distro() {
+        let error = ensure_wsl_paths_agree(
+            Path::new(r"\\wsl.localhost\Ubuntu\home\julien\dev\foo"),
+            "Debian",
+            "/home/julien/dev/foo",
+        )
+        .unwrap_err();
+        assert!(error.contains("Debian"));
+    }
+
+    #[test]
+    fn ensure_wsl_paths_agree_accepts_the_wsl_dollar_spelling() {
+        assert_eq!(
+            ensure_wsl_paths_agree(
+                Path::new(r"\\wsl$\Ubuntu\home\julien\dev\foo"),
+                "Ubuntu",
+                "/home/julien/dev/foo",
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn ensure_wsl_paths_agree_accepts_a_windows_hosted_project_without_comparison() {
+        assert_eq!(
+            ensure_wsl_paths_agree(Path::new(r"C:\dev\foo"), "Ubuntu", "/mnt/c/dev/foo"),
+            Ok(())
+        );
     }
 
     #[test]
@@ -704,20 +808,9 @@ Für dieses Projekt ist keine WSL-Distribution ausgewählt. Wähle in den Projek
         );
     }
 
-    const GIT_ENV: [(&str, &str); 3] = [
-        ("GIT_TERMINAL_PROMPT", "0"),
-        ("GIT_EDITOR", "true"),
-        ("GIT_SEQUENCE_EDITOR", "true"),
-    ];
-
     #[test]
     fn wsl_git_arguments_builds_the_exact_argv() {
-        let args = wsl_git_arguments(
-            "Ubuntu",
-            "/home/julien/dev/foo",
-            &GIT_ENV,
-            &["status", "--short"],
-        );
+        let args = wsl_git_arguments("Ubuntu", "/home/julien/dev/foo", &["status", "--short"]);
         assert_eq!(
             args,
             vec![
@@ -726,10 +819,6 @@ Für dieses Projekt ist keine WSL-Distribution ausgewählt. Wähle in den Projek
                 "--cd",
                 "/home/julien/dev/foo",
                 "--exec",
-                "env",
-                "GIT_TERMINAL_PROMPT=0",
-                "GIT_EDITOR=true",
-                "GIT_SEQUENCE_EDITOR=true",
                 "git",
                 "status",
                 "--short",
@@ -742,18 +831,13 @@ Für dieses Projekt ist keine WSL-Distribution ausgewählt. Wähle in den Projek
 
     #[test]
     fn wsl_git_arguments_exec_is_at_index_four() {
-        let args = wsl_git_arguments("Ubuntu", "/home/julien", &GIT_ENV, &["status"]);
+        let args = wsl_git_arguments("Ubuntu", "/home/julien", &["status"]);
         assert_eq!(args[4], "--exec");
     }
 
     #[test]
     fn wsl_git_arguments_preserves_a_literal_double_dash_after_git() {
-        let args = wsl_git_arguments(
-            "Ubuntu",
-            "/home/julien",
-            &GIT_ENV,
-            &["add", "--", "file.txt"],
-        );
+        let args = wsl_git_arguments("Ubuntu", "/home/julien", &["add", "--", "file.txt"]);
         let git_index = args.iter().position(|value| value == "git").unwrap();
         assert_eq!(
             &args[git_index + 1..],
@@ -764,12 +848,7 @@ Für dieses Projekt ist keine WSL-Distribution ausgewählt. Wähle in den Projek
 
     #[test]
     fn wsl_git_arguments_keeps_each_argument_its_own_element() {
-        let args = wsl_git_arguments(
-            "Ubuntu",
-            "/home/julien",
-            &GIT_ENV,
-            &["commit", "-m", "a b c"],
-        );
+        let args = wsl_git_arguments("Ubuntu", "/home/julien", &["commit", "-m", "a b c"]);
         assert_eq!(args.last(), Some(&"a b c".to_string()));
         assert_eq!(args[args.len() - 2], "-m");
     }

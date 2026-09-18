@@ -4,6 +4,7 @@ use std::{
     path::PathBuf,
     process::{Command, Stdio},
     thread,
+    time::Duration,
 };
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -244,6 +245,30 @@ pub(crate) fn start_process(
     Ok(ProcessStarted { pid })
 }
 
+const PGID_WAIT_ATTEMPTS: u32 = 40;
+const PGID_WAIT_DELAY: Duration = Duration::from_millis(50);
+
+// Stop pressed between spawn and the sentinel line finds `pgid: None` even
+// though the group is about to exist; a cold-starting distro that never runs
+// `bash` legitimately has none, so the wait stays bounded, not open-ended.
+fn wait_for_pgid(
+    run_id: &str,
+    registry: &ProcessRegistry,
+    attempts: u32,
+    delay: Duration,
+) -> Option<i32> {
+    for _ in 0..attempts {
+        if let Some(ProcessHandle::Wsl {
+            pgid: Some(pgid), ..
+        }) = registry.get(run_id)
+        {
+            return Some(pgid);
+        }
+        thread::sleep(delay);
+    }
+    None
+}
+
 pub(crate) fn stop_process(
     run_id: &str,
     pid: u32,
@@ -253,16 +278,22 @@ pub(crate) fn stop_process(
         Some(ProcessHandle::Wsl {
             launcher_pid,
             distro,
-            pgid: Some(pgid),
+            pgid,
         }) => {
-            stop_wsl_process_group(&distro, pgid)?;
-            // The launcher normally exits by itself once the group dies, so
-            // it not being found here is the happy path, not a failure, and
-            // its result must not surface as an error.
-            let _ = stop_native_process(launcher_pid);
-            Ok(())
+            let pgid = pgid
+                .or_else(|| wait_for_pgid(run_id, registry, PGID_WAIT_ATTEMPTS, PGID_WAIT_DELAY));
+            match pgid {
+                Some(pgid) => {
+                    stop_wsl_process_group(&distro, pgid)?;
+                    // The launcher normally exits by itself once the group dies, so
+                    // it not being found here is the happy path, not a failure, and
+                    // its result must not surface as an error.
+                    let _ = stop_native_process(launcher_pid);
+                    Ok(())
+                }
+                None => stop_native_process(launcher_pid),
+            }
         }
-        Some(ProcessHandle::Wsl { launcher_pid, .. }) => stop_native_process(launcher_pid),
         _ => stop_native_process(pid),
     }
 }
@@ -337,5 +368,44 @@ fn stop_native_process(pid: u32) -> Result<(), String> {
             .success()
             .then_some(())
             .ok_or_else(|| format!("kill meldete einen Fehler für PID {pid}."))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wait_for_pgid_returns_immediately_once_it_is_set() {
+        let registry = ProcessRegistry::default();
+        registry.register(
+            "run-1".to_string(),
+            ProcessHandle::Wsl {
+                launcher_pid: 111,
+                distro: "Ubuntu".to_string(),
+                pgid: Some(222),
+            },
+        );
+        assert_eq!(
+            wait_for_pgid("run-1", &registry, 40, Duration::from_millis(1)),
+            Some(222)
+        );
+    }
+
+    #[test]
+    fn wait_for_pgid_gives_up_after_the_bounded_attempts() {
+        let registry = ProcessRegistry::default();
+        registry.register(
+            "run-1".to_string(),
+            ProcessHandle::Wsl {
+                launcher_pid: 111,
+                distro: "Ubuntu".to_string(),
+                pgid: None,
+            },
+        );
+        assert_eq!(
+            wait_for_pgid("run-1", &registry, 3, Duration::from_millis(1)),
+            None
+        );
     }
 }
