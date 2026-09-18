@@ -22,6 +22,7 @@ export function ProcessesPanel({
   onClearFinished,
 }: ProcessesPanelProps) {
   const [expanded, setExpanded] = useState<string>();
+  const [copyState, setCopyState] = useState<Record<string, "copied" | "failed">>({});
   const { t, locale } = useI18n();
   const projectById = useMemo(() => new Map(projects.map((project) => [project.id, project])), [projects]);
   const active = processes.filter((process) => ["starting", "running", "stopping"].includes(process.status));
@@ -41,6 +42,22 @@ export function ProcessesPanel({
     minute: "2-digit",
     second: "2-digit",
   }).format(new Date(value));
+
+  // Local, per-process state instead of a toast: keeps the outcome next to the action that caused it.
+  const copyLog = async (process: ProcessRun) => {
+    try {
+      await navigator.clipboard.writeText(process.logs.join("\n"));
+      setCopyState((state) => ({ ...state, [process.id]: "copied" }));
+    } catch {
+      setCopyState((state) => ({ ...state, [process.id]: "failed" }));
+    }
+    setTimeout(() => {
+      setCopyState((state) => {
+        const { [process.id]: _removed, ...rest } = state;
+        return rest;
+      });
+    }, 2000);
+  };
 
   return (
     <Modal open={open} onClose={onClose} title={t(`Commands · ${active.length} aktiv`, `Commands · ${active.length} active`)} size="large">
@@ -71,6 +88,19 @@ export function ProcessesPanel({
                         <div className="process-card__footer">
                           <span>PID: {process.pid ?? "–"}</span>
                           {process.exitCode !== undefined && <span>{t("Exit-Code", "Exit code")}: {process.exitCode}</span>}
+                          <button
+                            className="button button--secondary button--small"
+                            type="button"
+                            onClick={() => copyLog(process)}
+                            disabled={process.logs.length === 0}
+                          >
+                            <Icon name="copy" />
+                            {copyState[process.id] === "copied"
+                              ? t("Kopiert", "Copied")
+                              : copyState[process.id] === "failed"
+                                ? t("Fehlgeschlagen", "Failed")
+                                : t("Ausgabe kopieren", "Copy output")}
+                          </button>
                           {isActive && <button className="button button--danger button--small" type="button" onClick={() => onStop(process)} disabled={!process.pid || process.status === "stopping"}><Icon name="square" />{process.status === "stopping" ? t("Wird beendet…", "Stopping…") : t("Stoppen", "Stop")}</button>}
                         </div>
                       </div>

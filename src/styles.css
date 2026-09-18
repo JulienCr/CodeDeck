@@ -2482,6 +2482,8 @@ svg {
   font-size: 11px;
   line-height: 1.55;
   white-space: pre-wrap;
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 :root[data-theme="light"] .terminal-output {

@@ -23,6 +23,8 @@ mod platform {
 }
 
 mod process {
+    pub(crate) mod ansi;
+    pub(crate) mod decode;
     pub(crate) mod manager;
     pub(crate) mod state;
 }
