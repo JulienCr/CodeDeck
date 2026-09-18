@@ -1,6 +1,14 @@
 export type Theme = "dark" | "light" | "system";
 export type Language = "de" | "en";
 
+export type NativeShell = "platformDefault" | "cmd" | "powerShell7" | "windowsPowerShell";
+export type ExecutionTarget = { type: "native"; shell: NativeShell };
+export type CommandShellInfo = {
+  id: Exclude<NativeShell, "platformDefault">;
+  available: boolean;
+  path: string | null;
+};
+
 export type Editor = {
   id: string;
   name: string;
@@ -107,6 +115,7 @@ export type Project = {
   buildCommand?: string;
   runCommand?: string;
   devPort?: number;
+  commandShell?: NativeShell | "inherit";
 };
 
 export type BuiltInProjectTemplateId =
@@ -196,6 +205,7 @@ export type AppSettings = {
   ideDetectionComplete: boolean;
   notifyOnCommandCompletion: boolean;
   githubToken: string;
+  commandShell: NativeShell;
 };
 
 export type AppData = {

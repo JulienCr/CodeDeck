@@ -5,7 +5,10 @@ use std::{
 use walkdir::WalkDir;
 
 use crate::{
-    platform::launchers::{self, hide_console_window, EditorSuggestion},
+    platform::{
+        execution::ExecutionTarget,
+        launchers::{self, hide_console_window, EditorSuggestion},
+    },
     projects::{
         inspection::{inspect_project_path, marker_names, ProjectCandidate, ProjectInspection},
         templates::{self, CreatedProject},
@@ -208,8 +211,12 @@ pub(crate) fn launch_template(
 }
 
 #[tauri::command]
-pub(crate) fn open_terminal(project_path: String, terminal_command: String) -> Result<(), String> {
-    launchers::open_terminal(project_path, terminal_command)
+pub(crate) fn open_terminal(
+    project_path: String,
+    terminal_command: String,
+    execution_target: Option<ExecutionTarget>,
+) -> Result<(), String> {
+    launchers::open_terminal(project_path, terminal_command, execution_target)
 }
 
 #[tauri::command]

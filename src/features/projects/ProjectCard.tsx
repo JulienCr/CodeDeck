@@ -1,11 +1,13 @@
 import { Icon } from "../../shared/components/Icon";
 import { useI18n } from "../../shared/i18n/I18n";
+import { nativeShellLabel } from "../../shared/lib/execution";
 import { getDetectedTechnologies } from "../../shared/lib/projectInspection";
-import type { Editor, Project, ProjectCommand } from "../../shared/types/models";
+import type { Editor, NativeShell, Project, ProjectCommand } from "../../shared/types/models";
 
 type ProjectCardProps = {
   project: Project;
   editor?: Editor;
+  effectiveCommandShell: NativeShell;
   onOpenDetails: () => void;
   onOpenEditor: () => void;
   onOpenTodos: () => void;
@@ -16,6 +18,7 @@ type ProjectCardProps = {
 export function ProjectCard({
   project,
   editor,
+  effectiveCommandShell,
   onOpenDetails,
   onOpenEditor,
   onOpenTodos,
@@ -96,6 +99,9 @@ export function ProjectCard({
           </>
         ) : (
           <span className="project-card__meta-muted">{t("Kein Git", "No Git")}</span>
+        )}
+        {effectiveCommandShell !== "platformDefault" && (
+          <span className="badge badge--muted">Windows · {nativeShellLabel(t, effectiveCommandShell)}</span>
         )}
       </div>
 

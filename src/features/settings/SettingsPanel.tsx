@@ -10,11 +10,14 @@ import {
 } from "../../shared/lib/tauri";
 import { createId } from "../../shared/lib/storage";
 import { mergeEditorSuggestions } from "../../shared/lib/editors";
+import { commandShellOptionLabel } from "../../shared/lib/execution";
 import type {
   AppSettings,
+  CommandShellInfo,
   CustomProjectTemplate,
   Editor,
   EditorSuggestion,
+  NativeShell,
 } from "../../shared/types/models";
 
 export type SettingsSection = "general" | "editors" | "templates" | "projects" | "github" | "updates" | "backup";
@@ -24,6 +27,7 @@ type SettingsPanelProps = {
   editors: Editor[];
   projectTemplates: CustomProjectTemplate[];
   settings: AppSettings;
+  commandShells: CommandShellInfo[];
   currentVersion: string;
   checkingForUpdates: boolean;
   initialSection?: SettingsSection;
@@ -39,6 +43,11 @@ type SettingsPanelProps = {
   onError: (message: string) => void;
 };
 
+function selectedShellPath(shells: CommandShellInfo[], selected: NativeShell) {
+  if (selected === "platformDefault") return "";
+  return shells.find((shell) => shell.id === selected)?.path ?? "";
+}
+
 type SettingsNavItem = {
   id: SettingsSection;
   icon: IconName;
@@ -51,6 +60,7 @@ export function SettingsPanel({
   editors,
   projectTemplates,
   settings,
+  commandShells,
   currentVersion,
   checkingForUpdates,
   initialSection = "general",
@@ -444,7 +454,20 @@ export function SettingsPanel({
               <div className="settings-section settings-section--plain">
                 <div className="form-field"><label htmlFor="default-project-dir">{t("Standard-Projektordner", "Default project folder")}</label><div className="input-action-row"><input id="default-project-dir" value={settings.defaultProjectDir} onChange={(event) => onSettingsChange({ ...settings, defaultProjectDir: event.target.value })} placeholder={t("~/Projekte", "~/Projects")} /><button className="button button--secondary" type="button" onClick={browseDefaultDirectory}><Icon name="folder" />{t("Ordner wählen", "Choose folder")}</button></div><small>{t("Dieser Ordner wird beim Erstellen neuer Projekte vorausgewählt.", "This folder is preselected when creating new projects.")}</small></div>
                 <div className="form-field"><label htmlFor="terminal-command">{t("Terminal-Startbefehl (optional)", "Terminal launch command (optional)")}</label><input id="terminal-command" value={settings.terminalCommand} onChange={(event) => onSettingsChange({ ...settings, terminalCommand: event.target.value })} placeholder={'wt.exe -d "{projectPath}"'} /><small>{t("Leer lassen, um das Standardterminal des Betriebssystems zu verwenden.", "Leave empty to use the operating-system default terminal.")}</small></div>
+                {commandShells.length > 0 && (
+                  <div className="form-field">
+                    <label htmlFor="command-shell">{t("Standard-Befehlsshell (Windows)", "Default command shell (Windows)")}</label>
+                    <select id="command-shell" value={settings.commandShell} onChange={(event) => onSettingsChange({ ...settings, commandShell: event.target.value as NativeShell })}>
+                      <option value="platformDefault">{t("Plattform-Standard", "Platform default")}</option>
+                      {commandShells.map((shell) => <option key={shell.id} value={shell.id}>{commandShellOptionLabel(t, shell)}</option>)}
+                    </select>
+                    {selectedShellPath(commandShells, settings.commandShell) && <small>{selectedShellPath(commandShells, settings.commandShell)}</small>}
+                  </div>
+                )}
               </div>
+              {commandShells.length > 0 && (
+                <div className="settings-help"><Icon name="info" /><p>{t("PowerShell lädt dein Benutzerprofil, damit Tools wie fnm auf dem PATH landen, den cmd.exe nicht sieht.", "PowerShell loads your user profile, so tools like fnm end up on the PATH that cmd.exe does not see.")}</p></div>
+              )}
               <label className="checkbox-row"><input type="checkbox" checked={settings.notifyOnCommandCompletion} onChange={(event) => onSettingsChange({ ...settings, notifyOnCommandCompletion: event.target.checked })} /><span><strong>{t("Desktop-Benachrichtigung nach Commands", "Desktop notification after commands")}</strong><small>{t("Code Deck meldet erfolgreiche und fehlgeschlagene Builds oder Runs über das Betriebssystem.", "Code Deck reports successful and failed builds or runs through the operating system.")}</small></span></label>
             </section>
           )}

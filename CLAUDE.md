@@ -44,7 +44,8 @@ Keeping each concern in its own module is what keeps the per-OS branching contai
 | Module | Owns |
 |---|---|
 | `src-tauri/src/commands/` | `#[tauri::command]` entry points only. Validate, delegate, map the error to a `String`. No spawning. |
-| `src-tauri/src/platform/launchers.rs` | How a child process is *built*: `shell_command()`, `hide_console_window()`, template splitting, IDE and terminal detection per OS. |
+| `src-tauri/src/platform/launchers.rs` | How a launched (IDE, terminal) child process is *built*: `shell_command()`, `hide_console_window()`, template splitting, IDE and terminal detection per OS. |
+| `src-tauri/src/platform/execution.rs` | How a project command's shell is chosen and its `Command` assembled: `ExecutionTarget`/`NativeShell`, `build_execution_command()`, Windows shell discovery. |
 | `src-tauri/src/process/` | How a long-running process is *run*: spawn, stdout/stderr reader threads, event emission, stop. |
 | `src-tauri/src/git/` | `run_git()` and the porcelain parser. Everything git-shaped goes through here. |
 | `src-tauri/src/projects/` | Tech inspection, template scaffolding, and the name/path sanitizers in `validation.rs`. |
@@ -102,7 +103,7 @@ The practical test: adding a new execution target should touch the spawn layer a
 Anything that assembles a command line is pure and must be unit-tested without spawning — that is the reason `fill_template`, `split_command_template`, `linux_terminal_arguments` and any path translation stay separate functions. Cover at minimum:
 
 - argument splitting and quoting for a path containing spaces, and for a path containing a quote;
-- the Windows `cmd.exe /D /S /C` form and the PowerShell argument list (`-NoProfile -NonInteractive`) — assert the built argv, never run it;
+- the Windows `cmd.exe /D /S /C` form and the PowerShell argument list (`-NoLogo -NonInteractive -Command`) — assert the built argv, never run it, and assert `-NoProfile` is **absent**: that negative check is the regression guard, since it is the flag a future contributor will helpfully add back;
 - Windows ↔ WSL path translation both ways, including a drive letter, a UNC path, and a path that must be left alone;
 - one test per branch of any new `#[cfg]` fork, gated with the same `#[cfg]` as the code it covers — `#[cfg(all(test, unix, not(target_os = "macos")))]` in `launchers.rs` is the existing pattern.
 

@@ -1,4 +1,5 @@
 mod commands {
+    pub(crate) mod execution;
     pub(crate) mod git;
     pub(crate) mod processes;
     pub(crate) mod projects;
@@ -16,6 +17,7 @@ mod projects {
 }
 
 mod platform {
+    pub(crate) mod execution;
     pub(crate) mod launchers;
     pub(crate) mod notifications;
 }
@@ -164,6 +166,7 @@ pub fn run() {
             commands::projects::open_target,
             commands::processes::start_process,
             commands::processes::stop_process,
+            commands::execution::detect_command_shells,
             storage::read_text_file,
             storage::write_text_file,
         ])

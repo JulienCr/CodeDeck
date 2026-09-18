@@ -2,6 +2,7 @@ import type { AppData, CustomProjectTemplate, Editor, ProjectCommand, ProjectTod
 import { suggestBuildCommand, suggestDevPort, suggestRunCommand } from "./projectRuntime";
 
 const STORAGE_KEY = "code-deck-data-v1";
+const NATIVE_SHELLS = ["platformDefault", "cmd", "powerShell7", "windowsPowerShell"] as const;
 
 const now = () => new Date().toISOString();
 
@@ -78,6 +79,7 @@ export function createDefaultData(): AppData {
       ideDetectionComplete: false,
       notifyOnCommandCompletion: true,
       githubToken: "",
+      commandShell: "platformDefault",
     },
   };
 }
@@ -164,6 +166,9 @@ export function normalizeData(input: unknown, imported = false): AppData {
           favorite: Boolean(project.favorite),
           archived: Boolean(project.archived),
           preferredEditorId: project.preferredEditorId ?? legacy.editorId,
+          commandShell: project.commandShell === "inherit" || NATIVE_SHELLS.includes(project.commandShell as typeof NATIVE_SHELLS[number])
+            ? project.commandShell
+            : undefined,
           commands: Array.isArray(project.commands)
             ? project.commands.map((command) => ({
                 ...normalizeCommand(command),
@@ -252,8 +257,16 @@ export function normalizeData(input: unknown, imported = false): AppData {
       theme: ["dark", "light", "system"].includes(value.settings?.theme ?? "")
         ? value.settings!.theme
         : fallback.settings.theme,
+      commandShell: NATIVE_SHELLS.includes(value.settings?.commandShell as typeof NATIVE_SHELLS[number])
+        ? value.settings!.commandShell
+        : fallback.settings.commandShell,
       language,
       githubToken: imported ? "" : value.settings?.githubToken?.trim() ?? "",
+      confirmImportedCommands: imported
+        ? true
+        : typeof value.settings?.confirmImportedCommands === "boolean"
+          ? value.settings.confirmImportedCommands
+          : fallback.settings.confirmImportedCommands,
     },
   };
 }

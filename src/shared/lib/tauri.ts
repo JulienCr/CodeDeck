@@ -3,8 +3,10 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import type {
   BuiltInProjectTemplateId,
+  CommandShellInfo,
   CreatedProject,
   EditorSuggestion,
+  ExecutionTarget,
   GitConflictContent,
   GitRepositoryStatus,
   ProcessExitEvent,
@@ -164,8 +166,15 @@ export const launchTemplate = (
     projectName,
   });
 
-export const openTerminal = (projectPath: string, terminalCommand: string) =>
-  call<void>("open_terminal", { projectPath, terminalCommand });
+export const openTerminal = (
+  projectPath: string,
+  terminalCommand: string,
+  executionTarget?: ExecutionTarget,
+) =>
+  call<void>("open_terminal", { projectPath, terminalCommand, executionTarget: executionTarget || null });
+
+export const detectCommandShells = () =>
+  call<CommandShellInfo[]>("detect_command_shells");
 
 export const openTarget = (target: string) =>
   call<void>("open_target", { target });
@@ -178,6 +187,7 @@ export const startProcess = (
   env: Record<string, string> = {},
   label = command,
   notifyOnExit = false,
+  executionTarget?: ExecutionTarget,
 ) =>
   call<{ pid: number }>("start_process", {
     runId,
@@ -187,6 +197,7 @@ export const startProcess = (
     env,
     label,
     notifyOnExit,
+    executionTarget: executionTarget || null,
   });
 
 export const stopProcess = (pid: number) =>

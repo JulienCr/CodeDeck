@@ -50,6 +50,8 @@ Each command can have:
 
 Starting a command opens a process entry where the output can be followed. A command is never run merely because it was imported or detected.
 
+On Windows, the **Befehlsshell** field in Build & Run overrides the global command shell for this project only: leave it on **Global übernehmen** to inherit the setting from Settings, or pin the project to Command Prompt, PowerShell 7 or Windows PowerShell. The effective shell shows as a badge next to the project name when it differs from the platform default.
+
 ## Detected package scripts
 
 For projects with `package.json`, Code Deck can show scripts from the `scripts` section. A suggestion is not yet a saved command. Save it when you want it to appear as a regular project action.

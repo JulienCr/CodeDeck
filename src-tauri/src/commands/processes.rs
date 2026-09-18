@@ -2,7 +2,10 @@ use std::collections::HashMap;
 
 use tauri::AppHandle;
 
-use crate::process::{manager, state::ProcessStarted};
+use crate::{
+    platform::execution::ExecutionTarget,
+    process::{manager, state::ProcessStarted},
+};
 
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
@@ -15,6 +18,7 @@ pub(crate) fn start_process(
     env: HashMap<String, String>,
     label: String,
     notify_on_exit: bool,
+    execution_target: Option<ExecutionTarget>,
 ) -> Result<ProcessStarted, String> {
     manager::start_process(
         app,
@@ -25,6 +29,7 @@ pub(crate) fn start_process(
         env,
         label,
         notify_on_exit,
+        execution_target,
     )
 }
 
