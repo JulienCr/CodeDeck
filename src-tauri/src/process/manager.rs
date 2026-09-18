@@ -28,10 +28,8 @@ use crate::{
 
 /// Injected by the (platform-gated) caller so this reader stays free of any
 /// `#[cfg]`: on WSL it checks a line against the pgid sentinel and records the
-/// match in the registry; native runs simply never construct one.
-struct PgidCapture {
-    try_capture: Box<dyn Fn(&str) -> bool + Send>,
-}
+/// match in the registry, returning whether the line was consumed.
+type PgidCapture = Box<dyn Fn(&str) -> bool + Send>;
 
 fn stream_process_output<R>(
     reader: R,
@@ -57,7 +55,7 @@ fn stream_process_output<R>(
                     let line = strip_ansi_codes(decode_output_bytes(&bytes));
 
                     if let Some(capture) = &capture {
-                        if (capture.try_capture)(&line) {
+                        if capture(&line) {
                             continue;
                         }
                     }
@@ -166,9 +164,9 @@ pub(crate) fn start_process(
             let scripted = wsl::script_with_pgid_marker(&marker, &command);
             let app_for_capture = app.clone();
             let run_id_for_capture = run_id.clone();
-            let capture = PgidCapture {
-                try_capture: Box::new(move |line: &str| {
-                    match wsl::parse_pgid_line(&marker, line) {
+            let capture: PgidCapture =
+                Box::new(
+                    move |line: &str| match wsl::parse_pgid_line(&marker, line) {
                         Some(pgid) => {
                             app_for_capture
                                 .state::<ProcessRegistry>()
@@ -176,9 +174,8 @@ pub(crate) fn start_process(
                             true
                         }
                         None => false,
-                    }
-                }),
-            };
+                    },
+                );
             (scripted, Some(capture))
         }
         ExecutionTarget::Native { .. } => (command.clone(), None),
@@ -253,7 +250,6 @@ pub(crate) fn stop_process(
     registry: &ProcessRegistry,
 ) -> Result<(), String> {
     match registry.get(run_id) {
-        #[cfg(target_os = "windows")]
         Some(ProcessHandle::Wsl {
             launcher_pid,
             distro,
@@ -261,17 +257,12 @@ pub(crate) fn stop_process(
         }) => {
             stop_wsl_process_group(&distro, pgid)?;
             // The launcher normally exits by itself once the group dies, so
-            // taskkill reporting "process not found" here is the happy path,
-            // not a failure — its result must not surface as an error.
-            let _ = taskkill(launcher_pid);
+            // it not being found here is the happy path, not a failure, and
+            // its result must not surface as an error.
+            let _ = stop_native_process(launcher_pid);
             Ok(())
         }
-        #[cfg(target_os = "windows")]
-        Some(ProcessHandle::Wsl {
-            launcher_pid,
-            pgid: None,
-            ..
-        }) => taskkill(launcher_pid),
+        Some(ProcessHandle::Wsl { launcher_pid, .. }) => stop_native_process(launcher_pid),
         _ => stop_native_process(pid),
     }
 }
@@ -304,8 +295,13 @@ fn stop_wsl_process_group(distro: &str, pgid: i32) -> Result<(), String> {
     }
 }
 
+#[cfg(not(target_os = "windows"))]
+fn stop_wsl_process_group(_distro: &str, _pgid: i32) -> Result<(), String> {
+    Err("WSL ist nur unter Windows verfügbar.".to_string())
+}
+
 #[cfg(target_os = "windows")]
-fn taskkill(pid: u32) -> Result<(), String> {
+fn stop_native_process(pid: u32) -> Result<(), String> {
     let mut command = Command::new("taskkill");
     command
         .args(["/PID", &pid.to_string(), "/T", "/F"])
@@ -321,11 +317,6 @@ fn taskkill(pid: u32) -> Result<(), String> {
     } else {
         Err(format!("taskkill meldete einen Fehler für PID {pid}."))
     }
-}
-
-#[cfg(target_os = "windows")]
-fn stop_native_process(pid: u32) -> Result<(), String> {
-    taskkill(pid)
 }
 
 #[cfg(not(target_os = "windows"))]

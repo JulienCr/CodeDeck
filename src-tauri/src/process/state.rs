@@ -50,6 +50,9 @@ impl ProcessRegistry {
         self.lock().insert(run_id, handle);
     }
 
+    // Only the WSL reader records a pgid, and WSL is Windows-only: an
+    // ungated method here is dead code on the other two CI platforms.
+    #[cfg(target_os = "windows")]
     pub(crate) fn set_pgid(&self, run_id: &str, pgid: i32) {
         if let Some(ProcessHandle::Wsl { pgid: slot, .. }) = self.lock().get_mut(run_id) {
             *slot = Some(pgid);
@@ -75,6 +78,7 @@ impl ProcessRegistry {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "windows")]
     #[test]
     fn register_then_set_pgid_then_read_back() {
         let registry = ProcessRegistry::default();
@@ -105,6 +109,7 @@ mod tests {
         assert_eq!(registry.get("run-1"), None);
     }
 
+    #[cfg(target_os = "windows")]
     #[test]
     fn set_pgid_does_not_affect_a_native_handle() {
         let registry = ProcessRegistry::default();
