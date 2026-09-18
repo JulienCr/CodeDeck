@@ -262,6 +262,11 @@ export function normalizeData(input: unknown, imported = false): AppData {
         : fallback.settings.commandShell,
       language,
       githubToken: imported ? "" : value.settings?.githubToken?.trim() ?? "",
+      confirmImportedCommands: imported
+        ? true
+        : typeof value.settings?.confirmImportedCommands === "boolean"
+          ? value.settings.confirmImportedCommands
+          : fallback.settings.confirmImportedCommands,
     },
   };
 }

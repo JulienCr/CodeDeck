@@ -11,7 +11,9 @@ use walkdir::WalkDir;
 
 use crate::platform::execution::ExecutionTarget;
 #[cfg(target_os = "windows")]
-use crate::platform::execution::NativeShell;
+use crate::platform::execution::{
+    resolve_windows_shell, shell_not_found_message, windows_shell_executable, NativeShell,
+};
 use crate::projects::validation::{display_path, project_name};
 
 #[cfg(target_os = "windows")]
@@ -961,35 +963,26 @@ fn linux_terminal_arguments(program: &str, executable: &Path, project_path: &str
 }
 
 #[cfg(target_os = "windows")]
-fn windows_terminal_arguments(shell: NativeShell, project_path: &str) -> (String, Vec<String>) {
+fn windows_terminal_arguments(shell: NativeShell, project_path: &str) -> Vec<String> {
     match shell {
-        NativeShell::PlatformDefault | NativeShell::Cmd => (
-            "cmd.exe".to_string(),
-            vec![
-                "/K".to_string(),
-                format!("cd /d \"{}\"", project_path.replace('"', "\"\"")),
-            ],
-        ),
-        NativeShell::PowerShell7 => (
-            "pwsh.exe".to_string(),
-            vec![
-                "-NoLogo".to_string(),
-                "-WorkingDirectory".to_string(),
-                project_path.to_string(),
-            ],
-        ),
-        NativeShell::WindowsPowerShell => (
-            "powershell.exe".to_string(),
-            vec![
-                "-NoLogo".to_string(),
-                "-NoExit".to_string(),
-                "-Command".to_string(),
-                format!(
-                    "Set-Location -LiteralPath '{}'",
-                    project_path.replace('\'', "''")
-                ),
-            ],
-        ),
+        NativeShell::PlatformDefault | NativeShell::Cmd => vec![
+            "/K".to_string(),
+            format!("cd /d \"{}\"", project_path.replace('"', "\"\"")),
+        ],
+        NativeShell::PowerShell7 => vec![
+            "-NoLogo".to_string(),
+            "-WorkingDirectory".to_string(),
+            project_path.to_string(),
+        ],
+        NativeShell::WindowsPowerShell => vec![
+            "-NoLogo".to_string(),
+            "-NoExit".to_string(),
+            "-Command".to_string(),
+            format!(
+                "Set-Location -LiteralPath '{}'",
+                project_path.replace('\'', "''")
+            ),
+        ],
     }
 }
 
@@ -1021,7 +1014,16 @@ pub(crate) fn open_terminal(
 
     #[cfg(target_os = "windows")]
     {
-        let (program, arguments) = windows_terminal_arguments(shell, &project_path);
+        let executable = windows_shell_executable(shell);
+        let program = resolve_windows_shell(shell).ok_or_else(|| {
+            shell_not_found_message(
+                "Terminal konnte nicht geöffnet werden.",
+                shell,
+                executable,
+                &path,
+            )
+        })?;
+        let arguments = windows_terminal_arguments(shell, &project_path);
         Command::new(program)
             .args(arguments)
             .current_dir(&path)
@@ -1116,8 +1118,7 @@ mod windows_terminal_tests {
 
     #[test]
     fn cmd_uses_the_classic_change_directory_form() {
-        let (program, args) = windows_terminal_arguments(NativeShell::Cmd, "C:\\dev\\foo");
-        assert_eq!(program, "cmd.exe");
+        let args = windows_terminal_arguments(NativeShell::Cmd, "C:\\dev\\foo");
         assert_eq!(
             args,
             vec!["/K".to_string(), "cd /d \"C:\\dev\\foo\"".to_string()]
@@ -1126,9 +1127,7 @@ mod windows_terminal_tests {
 
     #[test]
     fn platform_default_matches_cmd() {
-        let (program, args) =
-            windows_terminal_arguments(NativeShell::PlatformDefault, "C:\\dev\\foo");
-        assert_eq!(program, "cmd.exe");
+        let args = windows_terminal_arguments(NativeShell::PlatformDefault, "C:\\dev\\foo");
         assert_eq!(
             args,
             vec!["/K".to_string(), "cd /d \"C:\\dev\\foo\"".to_string()]
@@ -1137,8 +1136,7 @@ mod windows_terminal_tests {
 
     #[test]
     fn powershell7_uses_working_directory_flag() {
-        let (program, args) = windows_terminal_arguments(NativeShell::PowerShell7, "C:\\dev\\foo");
-        assert_eq!(program, "pwsh.exe");
+        let args = windows_terminal_arguments(NativeShell::PowerShell7, "C:\\dev\\foo");
         assert_eq!(
             args,
             vec![
@@ -1151,9 +1149,7 @@ mod windows_terminal_tests {
 
     #[test]
     fn windows_powershell_uses_set_location_literal_path() {
-        let (program, args) =
-            windows_terminal_arguments(NativeShell::WindowsPowerShell, "C:\\dev\\foo");
-        assert_eq!(program, "powershell.exe");
+        let args = windows_terminal_arguments(NativeShell::WindowsPowerShell, "C:\\dev\\foo");
         assert_eq!(
             args,
             vec![
@@ -1167,8 +1163,7 @@ mod windows_terminal_tests {
 
     #[test]
     fn windows_powershell_escapes_single_quotes_in_the_path() {
-        let (_, args) =
-            windows_terminal_arguments(NativeShell::WindowsPowerShell, "C:\\dev\\O'Brien");
+        let args = windows_terminal_arguments(NativeShell::WindowsPowerShell, "C:\\dev\\O'Brien");
         assert_eq!(
             args.last().unwrap(),
             "Set-Location -LiteralPath 'C:\\dev\\O''Brien'"

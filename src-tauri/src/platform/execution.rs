@@ -49,8 +49,13 @@ impl Default for ExecutionTarget {
     }
 }
 
+// `chcp` is an external process: if it ever fails without touching stdout,
+// it leaves $LASTEXITCODE set, and a later succeeding cmdlet does not clear
+// it — poisoning our own exit-code suffix. This form sets the console
+// encoding in-process and resets $LASTEXITCODE explicitly.
 #[cfg(target_os = "windows")]
-const POWERSHELL_UTF8_PREFIX: &str = "chcp 65001 > $null";
+const POWERSHELL_UTF8_PREFIX: &str =
+    "[Console]::OutputEncoding = [Text.Encoding]::UTF8\n$LASTEXITCODE = 0";
 
 // pwsh -Command collapses any failing native command's exit code to 1.
 // $LASTEXITCODE holds the real one; a non-terminating cmdlet failure instead
@@ -60,7 +65,7 @@ const POWERSHELL_EXIT_CODE_SUFFIX: &str =
     "if (-not $?) { exit $(if ($LASTEXITCODE) { $LASTEXITCODE } else { 1 }) }\nexit $LASTEXITCODE";
 
 #[cfg(target_os = "windows")]
-fn windows_shell_executable(shell: NativeShell) -> &'static str {
+pub(crate) fn windows_shell_executable(shell: NativeShell) -> &'static str {
     match shell {
         NativeShell::PlatformDefault | NativeShell::Cmd => "cmd.exe",
         NativeShell::PowerShell7 => "pwsh.exe",
@@ -86,7 +91,7 @@ fn powershell_arguments(script: &str) -> Vec<String> {
 }
 
 #[cfg(target_os = "windows")]
-fn resolve_windows_shell(shell: NativeShell) -> Option<PathBuf> {
+pub(crate) fn resolve_windows_shell(shell: NativeShell) -> Option<PathBuf> {
     match shell {
         NativeShell::PlatformDefault | NativeShell::Cmd => Some(PathBuf::from("cmd.exe")),
         NativeShell::PowerShell7 => {
@@ -119,9 +124,14 @@ fn resolve_windows_shell(shell: NativeShell) -> Option<PathBuf> {
 }
 
 #[cfg(target_os = "windows")]
-fn shell_not_found_message(shell: NativeShell, executable: &str, working_dir: &Path) -> String {
+pub(crate) fn shell_not_found_message(
+    headline: &str,
+    shell: NativeShell,
+    executable: &str,
+    working_dir: &Path,
+) -> String {
     format!(
-        "Command konnte nicht gestartet werden.\n\nUmgebung: Windows\nShell: {}\nProgramm: {executable}\nProjekt: {}\n\n{executable} wurde nicht gefunden. Wähle in den Einstellungen eine andere Command-Shell.",
+        "{headline}\n\nUmgebung: Windows\nShell: {}\nProgramm: {executable}\nProjekt: {}\n\n{executable} wurde nicht gefunden. Wähle in den Einstellungen eine andere Command-Shell.",
         shell.german_display_name(),
         display_path(working_dir)
     )
@@ -142,8 +152,14 @@ fn build_windows_command(
     }
 
     let executable = windows_shell_executable(*shell);
-    let program = resolve_windows_shell(*shell)
-        .ok_or_else(|| shell_not_found_message(*shell, executable, working_dir))?;
+    let program = resolve_windows_shell(*shell).ok_or_else(|| {
+        shell_not_found_message(
+            "Command konnte nicht gestartet werden.",
+            *shell,
+            executable,
+            working_dir,
+        )
+    })?;
 
     let mut command = Command::new(&program);
     command
@@ -284,7 +300,7 @@ mod tests {
                     "-NoLogo".to_string(),
                     "-NonInteractive".to_string(),
                     "-Command".to_string(),
-                    "chcp 65001 > $null\npnpm dev\nif (-not $?) { exit $(if ($LASTEXITCODE) { $LASTEXITCODE } else { 1 }) }\nexit $LASTEXITCODE".to_string(),
+                    "[Console]::OutputEncoding = [Text.Encoding]::UTF8\n$LASTEXITCODE = 0\npnpm dev\nif (-not $?) { exit $(if ($LASTEXITCODE) { $LASTEXITCODE } else { 1 }) }\nexit $LASTEXITCODE".to_string(),
                 ]
             );
         }
@@ -311,8 +327,9 @@ mod tests {
         }
 
         #[test]
-        fn shell_not_found_message_matches_the_diagnostic_format() {
+        fn shell_not_found_message_uses_the_command_headline() {
             let message = shell_not_found_message(
+                "Command konnte nicht gestartet werden.",
                 NativeShell::PowerShell7,
                 "pwsh.exe",
                 Path::new("C:\\dev\\foo"),
@@ -326,6 +343,45 @@ Programm: pwsh.exe\n\
 Projekt: C:\\dev\\foo\n\n\
 pwsh.exe wurde nicht gefunden. Wähle in den Einstellungen eine andere Command-Shell."
             );
+        }
+
+        #[test]
+        fn shell_not_found_message_uses_the_terminal_headline() {
+            let message = shell_not_found_message(
+                "Terminal konnte nicht geöffnet werden.",
+                NativeShell::PowerShell7,
+                "pwsh.exe",
+                Path::new("C:\\dev\\foo"),
+            );
+            assert_eq!(
+                message,
+                "Terminal konnte nicht geöffnet werden.\n\n\
+Umgebung: Windows\n\
+Shell: PowerShell 7\n\
+Programm: pwsh.exe\n\
+Projekt: C:\\dev\\foo\n\n\
+pwsh.exe wurde nicht gefunden. Wähle in den Einstellungen eine andere Command-Shell."
+            );
+        }
+    }
+
+    #[cfg(all(test, not(target_os = "windows")))]
+    mod non_windows {
+        use super::*;
+        use std::path::Path;
+
+        #[test]
+        fn build_execution_command_uses_the_login_shell() {
+            let target = ExecutionTarget::default();
+            let command =
+                build_execution_command(&target, "pnpm dev", Path::new("/tmp/foo")).unwrap();
+
+            assert_eq!(command.get_program(), "/bin/sh");
+            let args: Vec<_> = command
+                .get_args()
+                .map(|value| value.to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(args, vec!["-lc".to_string(), "pnpm dev".to_string()]);
         }
     }
 }

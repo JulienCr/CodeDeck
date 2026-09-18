@@ -985,7 +985,7 @@ export function App() {
                   key={project.id}
                   project={project}
                   editor={editorById.get(project.preferredEditorId ?? "")}
-                  effectiveCommandShell={resolveNativeShell(project, data.settings)}
+                  effectiveCommandShell={commandShells.length > 0 ? resolveNativeShell(project, data.settings) : "platformDefault"}
                   onOpenDetails={() => setSelectedProjectId(project.id)}
                   onOpenEditor={() => void openProjectEditor(project)}
                   onOpenTodos={() => setTodoProjectId(project.id)}

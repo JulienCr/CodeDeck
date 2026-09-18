@@ -211,7 +211,7 @@ export function ProjectDetails({
                 {technologies.slice(0, 8).map((technology) => (
                   <span className={`badge badge--${technology.kind}`} key={`${technology.kind}:${technology.label}`}><i aria-hidden="true" />{technology.label}</span>
                 ))}
-                {effectiveCommandShell !== "platformDefault" && (
+                {commandShells.length > 0 && effectiveCommandShell !== "platformDefault" && (
                   <span className="badge badge--muted">Windows · {nativeShellLabel(t, effectiveCommandShell)}</span>
                 )}
               </div>

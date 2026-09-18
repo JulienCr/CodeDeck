@@ -44,7 +44,8 @@ Keeping each concern in its own module is what keeps the per-OS branching contai
 | Module | Owns |
 |---|---|
 | `src-tauri/src/commands/` | `#[tauri::command]` entry points only. Validate, delegate, map the error to a `String`. No spawning. |
-| `src-tauri/src/platform/launchers.rs` | How a child process is *built*: `shell_command()`, `hide_console_window()`, template splitting, IDE and terminal detection per OS. |
+| `src-tauri/src/platform/launchers.rs` | How a launched (IDE, terminal) child process is *built*: `shell_command()`, `hide_console_window()`, template splitting, IDE and terminal detection per OS. |
+| `src-tauri/src/platform/execution.rs` | How a project command's shell is chosen and its `Command` assembled: `ExecutionTarget`/`NativeShell`, `build_execution_command()`, Windows shell discovery. |
 | `src-tauri/src/process/` | How a long-running process is *run*: spawn, stdout/stderr reader threads, event emission, stop. |
 | `src-tauri/src/git/` | `run_git()` and the porcelain parser. Everything git-shaped goes through here. |
 | `src-tauri/src/projects/` | Tech inspection, template scaffolding, and the name/path sanitizers in `validation.rs`. |
