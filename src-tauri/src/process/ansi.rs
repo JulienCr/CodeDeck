@@ -24,7 +24,7 @@ pub(crate) fn strip_ansi_codes(line: String) -> String {
                     }
                 }
             }
-            Some(']') => {
+            Some(']') | Some('P') | Some('X') | Some('^') | Some('_') => {
                 chars.next();
                 loop {
                     match chars.next() {
@@ -95,5 +95,11 @@ mod tests {
     #[test]
     fn literal_bracket_survives() {
         assert_eq!(strip_ansi_codes("array[0] = 1".to_string()), "array[0] = 1");
+    }
+
+    #[test]
+    fn strips_dcs_sequence_terminated_by_esc_backslash() {
+        let input = "\u{1b}P1$rdata\u{1b}\\rest";
+        assert_eq!(strip_ansi_codes(input.to_string()), "rest");
     }
 }
