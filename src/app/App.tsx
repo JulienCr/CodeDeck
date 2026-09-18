@@ -30,12 +30,13 @@ import {
   openTarget,
   openTerminal,
   readTextFile,
+  resolveWslLocation,
   setApplicationLanguage,
   startProcess,
   stopProcess,
   writeTextFile,
 } from "../shared/lib/tauri";
-import { defaultExecutionTarget, resolveExecutionTarget } from "../shared/lib/execution";
+import { defaultExecutionTarget, isWslUncPath, resolveExecutionTarget } from "../shared/lib/execution";
 import {
   checkForAppUpdate,
   getCurrentAppVersion,
@@ -699,7 +700,23 @@ export function App() {
 
   async function addCandidate(candidate: ProjectCandidate) {
     try {
-      const inspection = await inspectProject(candidate.path, defaultExecutionTarget());
+      let executionTarget = defaultExecutionTarget();
+      let executionRuntime: "wsl" | undefined;
+      let wslDistro: string | undefined;
+      let wslPath: string | undefined;
+      if (isWslUncPath(candidate.path)) {
+        // A failed WSL resolution must not block adding the project; fall back to native.
+        try {
+          const location = await resolveWslLocation(candidate.path);
+          executionTarget = { type: "wsl", distro: location.distro, linuxPath: location.linuxPath };
+          executionRuntime = "wsl";
+          wslDistro = location.distro;
+          wslPath = location.linuxPath;
+        } catch {
+          // keep the native fallback
+        }
+      }
+      const inspection = await inspectProject(candidate.path, executionTarget);
       const now = new Date().toISOString();
       addProject({
         id: createId(),
@@ -717,6 +734,9 @@ export function App() {
         buildCommand: suggestBuildCommand(inspection),
         runCommand: suggestRunCommand(inspection),
         devPort: suggestDevPort(inspection),
+        executionRuntime,
+        wslDistro,
+        wslPath,
       });
     } catch (error) {
       pushToast("error", t("Projekt konnte nicht hinzugefügt werden", "Could not add project"), errorMessage(error));

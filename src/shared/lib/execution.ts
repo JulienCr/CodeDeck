@@ -1,5 +1,12 @@
 import type { AppSettings, CommandShellInfo, ExecutionTarget, NativeShell, Project } from "../types/models";
 
+const WSL_UNC_PREFIXES = ["\\\\wsl.localhost\\", "\\\\wsl$\\"];
+
+export function isWslUncPath(path: string): boolean {
+  const normalized = path.trim().replace(/\//g, "\\").toLowerCase();
+  return WSL_UNC_PREFIXES.some((prefix) => normalized.startsWith(prefix.toLowerCase()));
+}
+
 export function resolveNativeShell(
   project: Pick<Project, "commandShell">,
   settings: Pick<AppSettings, "commandShell">,

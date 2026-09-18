@@ -104,6 +104,7 @@ export function ProjectDetails({
       wslDistro: project?.wslDistro ?? "",
       wslPath: project?.wslPath ?? "",
     });
+    setWslHostPath(undefined);
   }, [project]);
 
 
@@ -364,9 +365,12 @@ export function ProjectDetails({
                   )}
                 </div>
 
-                {wslDistros.length > 0 && (
+                {(wslDistros.length > 0 || currentProject.executionRuntime === "wsl") && (
                   <>
                   <p className="eyebrow">{t("Ausführungsumgebung", "Execution environment")}</p>
+                  {wslDistros.length === 0 && (
+                    <div className="notice"><Icon name="info" /><p>{t("Keine WSL-Distribution erkannt. Dieses Projekt ist weiter für WSL konfiguriert.", "No WSL distribution detected. This project is still configured for WSL.")}</p></div>
+                  )}
                   <div className="form-grid runtime-form-grid">
                     <div className="form-field">
                       <label htmlFor="runtime-execution-runtime">{t("Laufzeit", "Runtime")}</label>
@@ -389,6 +393,9 @@ export function ProjectDetails({
                             onChange={(event) => setRuntimeDraft({ ...runtimeDraft, wslDistro: event.target.value })}
                           >
                             <option value="">{t("Auswählen", "Select")}</option>
+                            {runtimeDraft.wslDistro && !wslDistros.includes(runtimeDraft.wslDistro) && (
+                              <option value={runtimeDraft.wslDistro}>{runtimeDraft.wslDistro}</option>
+                            )}
                             {wslDistros.map((distro) => <option key={distro} value={distro}>{distro}</option>)}
                           </select>
                         </div>
