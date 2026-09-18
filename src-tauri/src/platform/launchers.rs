@@ -14,6 +14,8 @@ use crate::platform::execution::ExecutionTarget;
 use crate::platform::execution::{
     resolve_windows_shell, shell_not_found_message, windows_shell_executable, NativeShell,
 };
+#[cfg(target_os = "windows")]
+use crate::platform::wsl;
 use crate::projects::validation::{display_path, project_name};
 
 #[cfg(target_os = "windows")]
@@ -730,10 +732,48 @@ pub(crate) fn shell_command(script: &str) -> Command {
     }
 }
 
-fn fill_template(template: &str, project_path: &str, project_name: &str) -> String {
-    template
+fn fill_template(
+    template: &str,
+    project_path: &str,
+    project_name: &str,
+    wsl: Option<(&str, &str)>,
+) -> Result<String, String> {
+    let filled = template
         .replace("{projectPath}", &project_path.replace('"', "\\\""))
-        .replace("{projectName}", &project_name.replace('"', "\\\""))
+        .replace("{projectName}", &project_name.replace('"', "\\\""));
+
+    match wsl {
+        Some((distro, linux_path)) => Ok(filled
+            .replace("{wslDistro}", &distro.replace('"', "\\\""))
+            .replace("{wslPath}", &linux_path.replace('"', "\\\""))),
+        None => {
+            for placeholder in ["{wslDistro}", "{wslPath}"] {
+                if filled.contains(placeholder) {
+                    return Err(format!(
+                        "Der Platzhalter {placeholder} ist nur für WSL-Projekte verfügbar."
+                    ));
+                }
+            }
+            Ok(filled)
+        }
+    }
+}
+
+fn reject_ide_wsl_placeholder(template: &str) -> Result<(), String> {
+    for placeholder in ["{wslDistro}", "{wslPath}"] {
+        if template.contains(placeholder) {
+            return Err(format!(
+                "Der Platzhalter {placeholder} steht nur im Terminal-Template zur Verfügung. IDEs erhalten den Windows-Pfad des Projekts."
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A UNC path (a WSL project's stored host path) that `cmd.exe` refuses as a
+/// working directory, silently falling back to `C:\Windows` instead.
+fn is_unc_path(path: &str) -> bool {
+    path.starts_with(r"\\") || path.starts_with("//")
 }
 
 fn split_command_template(value: &str) -> Result<Vec<String>, String> {
@@ -862,6 +902,9 @@ pub(crate) fn launch_template(
             "Das Command-Template muss den Platzhalter {projectPath} enthalten.".to_string(),
         );
     }
+    // Windows IDEs must not run inside WSL: a WSL project is opened through
+    // its host UNC path, so the WSL placeholders have no meaning here.
+    reject_ide_wsl_placeholder(&command_template)?;
 
     let requested_path = PathBuf::from(project_path.trim());
     if !requested_path.is_dir() {
@@ -986,6 +1029,43 @@ fn windows_terminal_arguments(shell: NativeShell, project_path: &str) -> Vec<Str
     }
 }
 
+#[cfg(target_os = "windows")]
+fn wsl_terminal_arguments(distro: &str, linux_path: &str) -> Vec<String> {
+    vec![
+        "-d".to_string(),
+        distro.to_string(),
+        "--cd".to_string(),
+        linux_path.to_string(),
+    ]
+}
+
+#[cfg(target_os = "windows")]
+fn open_wsl_terminal(distro: &str, linux_path: &str) -> Result<(), String> {
+    let distro = distro.trim();
+    let linux_path = linux_path.trim();
+    if distro.is_empty() || linux_path.is_empty() {
+        let detail = if distro.is_empty() {
+            "Für dieses Projekt ist keine WSL-Distribution ausgewählt. Wähle in den Projekteinstellungen eine Distribution aus."
+        } else {
+            "Für dieses Projekt ist kein Linux-Pfad hinterlegt. Lege ihn in den Projekteinstellungen fest."
+        };
+        return Err(wsl::wsl_error_message(
+            "Terminal konnte nicht geöffnet werden.",
+            distro,
+            linux_path,
+            detail,
+        ));
+    }
+
+    // No --exec and no login-shell script: unlike command execution, a
+    // terminal wants the user's interactive default login shell to run.
+    Command::new("wsl.exe")
+        .args(wsl_terminal_arguments(distro, linux_path))
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("WSL-Terminal konnte nicht gestartet werden: {error}"))
+}
+
 pub(crate) fn open_terminal(
     project_path: String,
     terminal_command: String,
@@ -997,9 +1077,25 @@ pub(crate) fn open_terminal(
     }
 
     if !terminal_command.trim().is_empty() {
-        let script = fill_template(&terminal_command, &project_path, &project_name(&path));
-        return shell_command(&script)
-            .current_dir(&path)
+        let wsl_context = match execution_target.as_ref() {
+            Some(ExecutionTarget::Wsl { distro, linux_path }) => {
+                Some((distro.as_str(), linux_path.as_str()))
+            }
+            _ => None,
+        };
+        let script = fill_template(
+            &terminal_command,
+            &project_path,
+            &project_name(&path),
+            wsl_context,
+        )?;
+        let mut command = shell_command(&script);
+        // cmd.exe refuses a UNC path as its working directory and silently
+        // falls back to C:\Windows; a WSL project's stored path is a UNC path.
+        if !is_unc_path(&project_path) {
+            command.current_dir(&path);
+        }
+        return command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -1010,7 +1106,20 @@ pub(crate) fn open_terminal(
 
     // The custom-terminal branch above stays cmd-flavored regardless of the
     // project's command shell (spec: the two settings are independent).
-    let ExecutionTarget::Native { shell } = execution_target.unwrap_or_default();
+    let shell = match execution_target.unwrap_or_default() {
+        ExecutionTarget::Native { shell } => shell,
+        ExecutionTarget::Wsl { distro, linux_path } => {
+            #[cfg(target_os = "windows")]
+            {
+                return open_wsl_terminal(&distro, &linux_path);
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let _ = (distro, linux_path);
+                return Err("WSL ist nur unter Windows verfügbar.".to_string());
+            }
+        }
+    };
 
     #[cfg(target_os = "windows")]
     {
@@ -1168,5 +1277,104 @@ mod windows_terminal_tests {
             args.last().unwrap(),
             "Set-Location -LiteralPath 'C:\\dev\\O''Brien'"
         );
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod wsl_terminal_tests {
+    use super::wsl_terminal_arguments;
+
+    #[test]
+    fn builds_the_login_shell_invocation() {
+        let args = wsl_terminal_arguments("Ubuntu", "/home/julien/dev/foo");
+        assert_eq!(
+            args,
+            vec![
+                "-d".to_string(),
+                "Ubuntu".to_string(),
+                "--cd".to_string(),
+                "/home/julien/dev/foo".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn never_execs_a_script_or_names_bash() {
+        let args = wsl_terminal_arguments("Ubuntu", "/home/julien/dev/foo");
+        assert!(!args.iter().any(|arg| arg == "--exec"));
+        assert!(!args.iter().any(|arg| arg.contains("bash")));
+    }
+}
+
+#[cfg(test)]
+mod fill_template_tests {
+    use super::{fill_template, is_unc_path, reject_ide_wsl_placeholder};
+
+    #[test]
+    fn ide_templates_reject_the_wsl_placeholders() {
+        for template in ["idea \"{projectPath}\" {wslPath}", "idea {wslDistro}"] {
+            let error = reject_ide_wsl_placeholder(template).unwrap_err();
+            assert!(error.contains("Terminal-Template"));
+        }
+        assert!(reject_ide_wsl_placeholder("idea \"{projectPath}\"").is_ok());
+    }
+
+    #[test]
+    fn substitutes_the_wsl_placeholders_when_context_is_given() {
+        let filled = fill_template(
+            "wt.exe -d \"{projectPath}\" --title {wslDistro}:{wslPath}",
+            "\\\\wsl.localhost\\Ubuntu\\home\\x",
+            "foo",
+            Some(("Ubuntu", "/home/x")),
+        )
+        .unwrap();
+        assert_eq!(
+            filled,
+            "wt.exe -d \"\\\\wsl.localhost\\Ubuntu\\home\\x\" --title Ubuntu:/home/x"
+        );
+    }
+
+    #[test]
+    fn escapes_a_quote_in_the_wsl_placeholders_like_the_existing_ones() {
+        let filled = fill_template(
+            "echo {wslDistro} {wslPath}",
+            "C:\\dev\\foo",
+            "foo",
+            Some(("Ub\"untu", "/home/\"x")),
+        )
+        .unwrap();
+        assert_eq!(filled, "echo Ub\\\"untu /home/\\\"x");
+    }
+
+    #[test]
+    fn rejects_wsl_path_placeholder_without_wsl_context() {
+        let error = fill_template("echo {wslPath}", "C:\\dev\\foo", "foo", None).unwrap_err();
+        assert!(error.contains("{wslPath}"));
+    }
+
+    #[test]
+    fn rejects_wsl_distro_placeholder_without_wsl_context() {
+        let error = fill_template("echo {wslDistro}", "C:\\dev\\foo", "foo", None).unwrap_err();
+        assert!(error.contains("{wslDistro}"));
+    }
+
+    #[test]
+    fn keeps_existing_placeholder_behavior_unchanged_without_wsl_context() {
+        let filled = fill_template(
+            "code \"{projectPath}\" --name {projectName}",
+            "C:\\dev\\foo",
+            "foo\"bar",
+            None,
+        )
+        .unwrap();
+        assert_eq!(filled, "code \"C:\\dev\\foo\" --name foo\\\"bar");
+    }
+
+    #[test]
+    fn recognizes_unc_paths_and_leaves_drive_and_unix_paths_alone() {
+        assert!(is_unc_path("\\\\wsl.localhost\\Ubuntu\\home\\x"));
+        assert!(is_unc_path("//server/share"));
+        assert!(!is_unc_path("C:\\dev\\foo"));
+        assert!(!is_unc_path("/home/x"));
     }
 }

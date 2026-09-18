@@ -6,7 +6,10 @@ use std::{
 };
 use walkdir::WalkDir;
 
-use crate::{git::repository::command_output, projects::validation::should_skip};
+use crate::{
+    git::repository::git_output, platform::execution::ExecutionTarget,
+    projects::validation::should_skip,
+};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -263,7 +266,7 @@ fn detected_source_languages(root: &Path) -> Vec<String> {
         .collect()
 }
 
-pub(crate) fn inspect_project_path(root: &Path) -> ProjectInspection {
+pub(crate) fn inspect_project_path(target: &ExecutionTarget, root: &Path) -> ProjectInspection {
     let markers = marker_names(root);
     let source_languages = detected_source_languages(root);
     let mut languages = BTreeSet::new();
@@ -484,19 +487,19 @@ pub(crate) fn inspect_project_path(root: &Path) -> ProjectInspection {
     }
 
     let is_git = root.join(".git").exists()
-        || command_output(root, "git", &["rev-parse", "--is-inside-work-tree"])
+        || git_output(target, root, &["rev-parse", "--is-inside-work-tree"])
             .is_some_and(|value| value == "true");
 
     let (branch, changed_files, last_commit) = if is_git {
-        let branch = command_output(root, "git", &["branch", "--show-current"])
+        let branch = git_output(target, root, &["branch", "--show-current"])
             .filter(|value| !value.is_empty())
-            .or_else(|| command_output(root, "git", &["rev-parse", "--short", "HEAD"]));
-        let changed_files = command_output(root, "git", &["status", "--porcelain"])
+            .or_else(|| git_output(target, root, &["rev-parse", "--short", "HEAD"]));
+        let changed_files = git_output(target, root, &["status", "--porcelain"])
             .map(|value| value.lines().filter(|line| !line.trim().is_empty()).count())
             .unwrap_or(0);
-        let last_commit = command_output(
+        let last_commit = git_output(
+            target,
             root,
-            "git",
             &[
                 "log",
                 "-1",
