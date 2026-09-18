@@ -14,7 +14,11 @@ use crate::{
         execution::{build_execution_command, ExecutionTarget},
         notifications::send_system_notification,
     },
-    process::state::{ProcessExitEvent, ProcessOutputEvent, ProcessStarted},
+    process::{
+        ansi::strip_ansi_codes,
+        decode::decode_output_bytes,
+        state::{ProcessExitEvent, ProcessOutputEvent, ProcessStarted},
+    },
     projects::validation::display_path,
 };
 
@@ -34,7 +38,7 @@ where
                     while matches!(bytes.last().copied(), Some(b'\n') | Some(b'\r')) {
                         bytes.pop();
                     }
-                    let line = String::from_utf8_lossy(&bytes).into_owned();
+                    let line = strip_ansi_codes(decode_output_bytes(&bytes));
                     let _ = app.emit(
                         "code-deck://process-output",
                         ProcessOutputEvent {
