@@ -20,6 +20,8 @@ mod platform {
     pub(crate) mod execution;
     pub(crate) mod launchers;
     pub(crate) mod notifications;
+    #[cfg(target_os = "windows")]
+    pub(crate) mod wsl;
 }
 
 mod process {
@@ -82,6 +84,8 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
+            app.manage(process::state::ProcessRegistry::default());
+
             #[cfg(desktop)]
             {
                 use tauri::{
@@ -169,6 +173,8 @@ pub fn run() {
             commands::processes::start_process,
             commands::processes::stop_process,
             commands::execution::detect_command_shells,
+            commands::execution::detect_wsl_distros,
+            commands::execution::resolve_wsl_location,
             storage::read_text_file,
             storage::write_text_file,
         ])

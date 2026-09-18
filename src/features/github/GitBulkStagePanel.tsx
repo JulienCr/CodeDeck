@@ -3,10 +3,11 @@ import { useEffect, useMemo, useState } from "react";
 import { Icon } from "../../shared/components/Icon";
 import { useI18n } from "../../shared/i18n/I18n";
 import { getGitStatus, gitStageFiles } from "../../shared/lib/tauri";
-import type { GitFileStatus, GitRepositoryStatus, Project, ProjectInspection } from "../../shared/types/models";
+import type { ExecutionTarget, GitFileStatus, GitRepositoryStatus, Project, ProjectInspection } from "../../shared/types/models";
 
 type GitBulkStagePanelProps = {
   project: Project;
+  executionTarget: ExecutionTarget;
   onRefreshInspection: () => Promise<ProjectInspection | undefined>;
   onStaged: () => void;
   onSuccess: (message: string) => void;
@@ -50,6 +51,7 @@ function matchesPreset(file: GitFileStatus, preset: StagePreset) {
 
 export function GitBulkStagePanel({
   project,
+  executionTarget,
   onRefreshInspection,
   onStaged,
   onSuccess,
@@ -81,7 +83,7 @@ export function GitBulkStagePanel({
   async function reload(reportError = true) {
     setLoading(true);
     try {
-      setStatus(await getGitStatus(project.path));
+      setStatus(await getGitStatus(project.path, executionTarget));
     } catch (error) {
       if (reportError) onError(messageOf(error));
     } finally {
@@ -95,7 +97,7 @@ export function GitBulkStagePanel({
 
     setBusyPreset(preset);
     try {
-      await gitStageFiles(project.path, paths);
+      await gitStageFiles(project.path, paths, executionTarget);
       await onRefreshInspection();
       await reload(false);
       onStaged();

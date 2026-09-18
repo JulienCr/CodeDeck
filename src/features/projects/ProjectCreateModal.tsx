@@ -3,6 +3,7 @@ import { Icon } from "../../shared/components/Icon";
 import { Modal } from "../../shared/components/Modal";
 import { useI18n } from "../../shared/i18n/I18n";
 import { getBuiltInProjectTemplates } from "../../shared/lib/projectTemplates";
+import { defaultExecutionTarget, isWslUncPath } from "../../shared/lib/execution";
 import { suggestBuildCommand, suggestDevPort, suggestRunCommand } from "../../shared/lib/projectRuntime";
 import { createId } from "../../shared/lib/storage";
 import {
@@ -10,13 +11,36 @@ import {
   cloneRepository,
   createProjectFromTemplate,
   inspectProject,
+  resolveWslLocation,
 } from "../../shared/lib/tauri";
 import type {
   CustomProjectTemplate,
   Editor,
+  ExecutionTarget,
   Project,
   ProjectInspection,
 } from "../../shared/types/models";
+
+// A failed WSL resolution must not block adding the project; fall back to native.
+async function resolveWslProjectFields(path: string): Promise<{
+  executionTarget: ExecutionTarget;
+  executionRuntime?: "wsl";
+  wslDistro?: string;
+  wslPath?: string;
+}> {
+  if (!isWslUncPath(path)) return { executionTarget: defaultExecutionTarget() };
+  try {
+    const location = await resolveWslLocation(path);
+    return {
+      executionTarget: { type: "wsl", distro: location.distro, linuxPath: location.linuxPath },
+      executionRuntime: "wsl",
+      wslDistro: location.distro,
+      wslPath: location.linuxPath,
+    };
+  } catch {
+    return { executionTarget: defaultExecutionTarget() };
+  }
+}
 
 type ProjectCreateModalProps = {
   open: boolean;
@@ -73,6 +97,7 @@ export function ProjectCreateModal({
   const [templateKey, setTemplateKey] = useState("builtin:node-typescript");
   const [inspection, setInspection] = useState<ProjectInspection>();
   const [loading, setLoading] = useState(false);
+  const [existingWsl, setExistingWsl] = useState<{ executionRuntime?: "wsl"; wslDistro?: string; wslPath?: string }>({});
 
   const enabledEditors = useMemo(() => editors.filter((editor) => editor.enabled), [editors]);
   const selectedBuiltIn = templateKey.startsWith("builtin:")
@@ -100,6 +125,7 @@ export function ProjectCreateModal({
     setTemplateKey("builtin:node-typescript");
     setInspection(undefined);
     setLoading(false);
+    setExistingWsl({});
   }, [open, defaultProjectDir, enabledEditors]);
 
   function selectTemplate(key: string) {
@@ -115,7 +141,9 @@ export function ProjectCreateModal({
       setExistingPath(selected);
       setName((current) => current || folderName(selected, t("Neues Projekt", "New project")));
       setLoading(true);
-      const result = await inspectProject(selected);
+      const wsl = await resolveWslProjectFields(selected);
+      setExistingWsl({ executionRuntime: wsl.executionRuntime, wslDistro: wsl.wslDistro, wslPath: wsl.wslPath });
+      const result = await inspectProject(selected, wsl.executionTarget);
       setInspection(result);
     } catch (error) {
       onError(error instanceof Error ? error.message : String(error));
@@ -137,7 +165,9 @@ export function ProjectCreateModal({
     if (!existingPath.trim()) return;
     setLoading(true);
     try {
-      const result = await inspectProject(existingPath.trim());
+      const wsl = await resolveWslProjectFields(existingPath.trim());
+      setExistingWsl({ executionRuntime: wsl.executionRuntime, wslDistro: wsl.wslDistro, wslPath: wsl.wslPath });
+      const result = await inspectProject(existingPath.trim(), wsl.executionTarget);
       setInspection(result);
     } catch (error) {
       onError(error instanceof Error ? error.message : String(error));
@@ -146,7 +176,12 @@ export function ProjectCreateModal({
     }
   }
 
-  function buildProject(path: string, projectInspection: ProjectInspection, projectName = name.trim()): Project {
+  function buildProject(
+    path: string,
+    projectInspection: ProjectInspection,
+    projectName = name.trim(),
+    wsl: { executionRuntime?: "wsl"; wslDistro?: string; wslPath?: string } = {},
+  ): Project {
     const now = new Date().toISOString();
     return {
       id: createId(),
@@ -170,6 +205,9 @@ export function ProjectCreateModal({
       buildCommand: suggestBuildCommand(projectInspection),
       runCommand: suggestRunCommand(projectInspection),
       devPort: suggestDevPort(projectInspection),
+      executionRuntime: wsl.executionRuntime,
+      wslDistro: wsl.wslDistro,
+      wslPath: wsl.wslPath,
     };
   }
 
@@ -199,7 +237,7 @@ export function ProjectCreateModal({
           cloneBranch.trim() || undefined,
           shallowClone,
         );
-        const result = await inspectProject(created.path);
+        const result = await inspectProject(created.path, defaultExecutionTarget());
         const displayName = name.trim() || created.name;
         setName(displayName);
         onCreate(buildProject(created.path, result, displayName));
@@ -224,9 +262,11 @@ export function ProjectCreateModal({
       }
       setLoading(true);
       try {
-        const result = inspection ?? await inspectProject(existingPath.trim());
+        const resolvedWsl = inspection ? undefined : await resolveWslProjectFields(existingPath.trim());
+        const wsl = resolvedWsl ?? existingWsl;
+        const result = inspection ?? await inspectProject(existingPath.trim(), resolvedWsl?.executionTarget ?? defaultExecutionTarget());
         if (!result.exists) throw new Error(t("Der ausgewählte Projektordner wurde nicht gefunden.", "The selected project folder could not be found."));
-        onCreate(buildProject(existingPath.trim(), result));
+        onCreate(buildProject(existingPath.trim(), result, undefined, wsl));
         onClose();
       } catch (error) {
         onError(error instanceof Error ? error.message : String(error));
@@ -255,7 +295,7 @@ export function ProjectCreateModal({
         initGit,
         selectedBuiltIn?.id === "spring-boot" ? javaPackageBase.trim() : undefined,
       );
-      const result = await inspectProject(created.path);
+      const result = await inspectProject(created.path, defaultExecutionTarget());
       onCreate(buildProject(created.path, result));
       onClose();
     } catch (error) {

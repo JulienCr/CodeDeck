@@ -7,23 +7,28 @@ use crate::{
     git::{
         parser::{parse_git_status_files, GitConflictContent, GitRepositoryStatus},
         repository::{
-            command_output, current_git_operation, git_project_root, read_git_stage, run_git,
+            current_git_operation, git_output, git_project_root, read_git_stage, run_git,
             safe_repo_path,
         },
     },
+    platform::execution::ExecutionTarget,
     projects::validation::display_path,
 };
 
 #[tauri::command]
-pub(crate) fn git_remote_url(project_path: String) -> Result<Option<String>, String> {
-    let root = git_project_root(&project_path)?;
-    if let Some(origin) = command_output(&root, "git", &["remote", "get-url", "origin"])
+pub(crate) fn git_remote_url(
+    project_path: String,
+    execution_target: Option<ExecutionTarget>,
+) -> Result<Option<String>, String> {
+    let target = execution_target.unwrap_or_default();
+    let root = git_project_root(&target, &project_path)?;
+    if let Some(origin) = git_output(&target, &root, &["remote", "get-url", "origin"])
         .filter(|value| !value.is_empty())
     {
         return Ok(Some(origin));
     }
 
-    let remote_name = command_output(&root, "git", &["remote"]).and_then(|value| {
+    let remote_name = git_output(&target, &root, &["remote"]).and_then(|value| {
         value
             .lines()
             .map(str::trim)
@@ -35,13 +40,16 @@ pub(crate) fn git_remote_url(project_path: String) -> Result<Option<String>, Str
     };
 
     Ok(
-        command_output(&root, "git", &["remote", "get-url", remote_name.as_str()])
+        git_output(&target, &root, &["remote", "get-url", remote_name.as_str()])
             .filter(|value| !value.is_empty()),
     )
 }
 
 #[tauri::command]
-pub(crate) fn git_init_repository(project_path: String) -> Result<(), String> {
+pub(crate) fn git_init_repository(
+    project_path: String,
+    execution_target: Option<ExecutionTarget>,
+) -> Result<(), String> {
     let root = PathBuf::from(project_path.trim());
     if !root.is_dir() {
         return Err(format!(
@@ -49,18 +57,27 @@ pub(crate) fn git_init_repository(project_path: String) -> Result<(), String> {
             display_path(&root)
         ));
     }
-    run_git(&root, &["init".to_string()]).map(|_| ())
+    run_git(
+        &execution_target.unwrap_or_default(),
+        &root,
+        &["init".to_string()],
+    )
+    .map(|_| ())
 }
 
 #[tauri::command]
-pub(crate) fn git_status(project_path: String) -> Result<GitRepositoryStatus, String> {
-    let root = git_project_root(&project_path)?;
-    let branch = command_output(&root, "git", &["branch", "--show-current"])
+pub(crate) fn git_status(
+    project_path: String,
+    execution_target: Option<ExecutionTarget>,
+) -> Result<GitRepositoryStatus, String> {
+    let target = execution_target.unwrap_or_default();
+    let root = git_project_root(&target, &project_path)?;
+    let branch = git_output(&target, &root, &["branch", "--show-current"])
         .filter(|value| !value.is_empty())
-        .or_else(|| command_output(&root, "git", &["rev-parse", "--short", "HEAD"]));
-    let upstream = command_output(
+        .or_else(|| git_output(&target, &root, &["rev-parse", "--short", "HEAD"]));
+    let upstream = git_output(
+        &target,
         &root,
-        "git",
         &[
             "rev-parse",
             "--abbrev-ref",
@@ -72,9 +89,9 @@ pub(crate) fn git_status(project_path: String) -> Result<GitRepositoryStatus, St
     let (ahead, behind) = upstream
         .as_ref()
         .and_then(|_| {
-            command_output(
+            git_output(
+                &target,
                 &root,
-                "git",
                 &["rev-list", "--left-right", "--count", "HEAD...@{upstream}"],
             )
         })
@@ -84,6 +101,7 @@ pub(crate) fn git_status(project_path: String) -> Result<GitRepositoryStatus, St
         })
         .unwrap_or((0, 0));
     let raw = run_git(
+        &target,
         &root,
         &[
             "status".to_string(),
@@ -98,15 +116,20 @@ pub(crate) fn git_status(project_path: String) -> Result<GitRepositoryStatus, St
         upstream,
         ahead,
         behind,
-        operation: current_git_operation(&root),
+        operation: current_git_operation(&target, &root),
         files: parse_git_status_files(&raw),
     })
 }
 
 #[tauri::command]
-pub(crate) fn git_branches(project_path: String) -> Result<Vec<String>, String> {
-    let root = git_project_root(&project_path)?;
+pub(crate) fn git_branches(
+    project_path: String,
+    execution_target: Option<ExecutionTarget>,
+) -> Result<Vec<String>, String> {
+    let target = execution_target.unwrap_or_default();
+    let root = git_project_root(&target, &project_path)?;
     let output = run_git(
+        &target,
         &root,
         &[
             "branch".to_string(),
@@ -164,7 +187,12 @@ fn untracked_file_diff(file_path: &str, bytes: Vec<u8>) -> String {
     diff.trim_end_matches('\n').to_string()
 }
 
-fn tracked_file_diff(root: &Path, file_path: &str, cached: bool) -> Result<String, String> {
+fn tracked_file_diff(
+    target: &ExecutionTarget,
+    root: &Path,
+    file_path: &str,
+    cached: bool,
+) -> Result<String, String> {
     let mut args = vec![
         "diff".to_string(),
         "--no-ext-diff".to_string(),
@@ -174,7 +202,7 @@ fn tracked_file_diff(root: &Path, file_path: &str, cached: bool) -> Result<Strin
         args.push("--cached".to_string());
     }
     args.extend(["--".to_string(), file_path.to_string()]);
-    run_git(root, &args)
+    run_git(target, root, &args)
 }
 
 #[tauri::command]
@@ -184,15 +212,17 @@ pub(crate) fn git_diff(
     staged: bool,
     unstaged: bool,
     untracked: bool,
+    execution_target: Option<ExecutionTarget>,
 ) -> Result<String, String> {
-    let root = git_project_root(&project_path)?;
-    let target = safe_repo_path(&root, &file_path)?;
+    let target = execution_target.unwrap_or_default();
+    let root = git_project_root(&target, &project_path)?;
+    let repo_path = safe_repo_path(&root, &file_path)?;
 
     if untracked {
-        let bytes = fs::read(&target).map_err(|error| {
+        let bytes = fs::read(&repo_path).map_err(|error| {
             format!(
                 "Untracked file could not be read ({}): {error}",
-                display_path(&target)
+                display_path(&repo_path)
             )
         })?;
         return Ok(untracked_file_diff(&file_path, bytes));
@@ -200,13 +230,13 @@ pub(crate) fn git_diff(
 
     let mut sections = Vec::new();
     if staged {
-        let staged_diff = tracked_file_diff(&root, &file_path, true)?;
+        let staged_diff = tracked_file_diff(&target, &root, &file_path, true)?;
         if !staged_diff.is_empty() {
             sections.push(staged_diff);
         }
     }
     if unstaged || !staged {
-        let unstaged_diff = tracked_file_diff(&root, &file_path, false)?;
+        let unstaged_diff = tracked_file_diff(&target, &root, &file_path, false)?;
         if !unstaged_diff.is_empty() {
             sections.push(unstaged_diff);
         }
@@ -243,8 +273,13 @@ mod diff_tests {
 }
 
 #[tauri::command]
-pub(crate) fn git_stage(project_path: String, paths: Vec<String>) -> Result<(), String> {
-    let root = git_project_root(&project_path)?;
+pub(crate) fn git_stage(
+    project_path: String,
+    paths: Vec<String>,
+    execution_target: Option<ExecutionTarget>,
+) -> Result<(), String> {
+    let target = execution_target.unwrap_or_default();
+    let root = git_project_root(&target, &project_path)?;
     if paths.is_empty() {
         return Err("Wähle mindestens eine Datei aus.".to_string());
     }
@@ -253,12 +288,17 @@ pub(crate) fn git_stage(project_path: String, paths: Vec<String>) -> Result<(), 
     }
     let mut args = vec!["add".to_string(), "--".to_string()];
     args.extend(paths);
-    run_git(&root, &args).map(|_| ())
+    run_git(&target, &root, &args).map(|_| ())
 }
 
 #[tauri::command]
-pub(crate) fn git_unstage(project_path: String, paths: Vec<String>) -> Result<(), String> {
-    let root = git_project_root(&project_path)?;
+pub(crate) fn git_unstage(
+    project_path: String,
+    paths: Vec<String>,
+    execution_target: Option<ExecutionTarget>,
+) -> Result<(), String> {
+    let target = execution_target.unwrap_or_default();
+    let root = git_project_root(&target, &project_path)?;
     if paths.is_empty() {
         return Err("Wähle mindestens eine Datei aus.".to_string());
     }
@@ -271,17 +311,23 @@ pub(crate) fn git_unstage(project_path: String, paths: Vec<String>) -> Result<()
         "--".to_string(),
     ];
     args.extend(paths);
-    run_git(&root, &args).map(|_| ())
+    run_git(&target, &root, &args).map(|_| ())
 }
 
 #[tauri::command]
-pub(crate) fn git_commit(project_path: String, message: String) -> Result<(), String> {
-    let root = git_project_root(&project_path)?;
+pub(crate) fn git_commit(
+    project_path: String,
+    message: String,
+    execution_target: Option<ExecutionTarget>,
+) -> Result<(), String> {
+    let target = execution_target.unwrap_or_default();
+    let root = git_project_root(&target, &project_path)?;
     let message = message.trim();
     if message.is_empty() {
         return Err("Die Commit-Nachricht darf nicht leer sein.".to_string());
     }
     run_git(
+        &target,
         &root,
         &["commit".to_string(), "-m".to_string(), message.to_string()],
     )
@@ -289,23 +335,34 @@ pub(crate) fn git_commit(project_path: String, message: String) -> Result<(), St
 }
 
 #[tauri::command]
-pub(crate) fn git_checkout_branch(project_path: String, branch: String) -> Result<(), String> {
-    let root = git_project_root(&project_path)?;
+pub(crate) fn git_checkout_branch(
+    project_path: String,
+    branch: String,
+    execution_target: Option<ExecutionTarget>,
+) -> Result<(), String> {
+    let target = execution_target.unwrap_or_default();
+    let root = git_project_root(&target, &project_path)?;
     let branch = branch.trim();
     if branch.is_empty() || branch.starts_with('-') {
         return Err("Ungültiger Branch-Name.".to_string());
     }
-    run_git(&root, &["switch".to_string(), branch.to_string()]).map(|_| ())
+    run_git(&target, &root, &["switch".to_string(), branch.to_string()]).map(|_| ())
 }
 
 #[tauri::command]
-pub(crate) fn git_create_branch(project_path: String, branch: String) -> Result<(), String> {
-    let root = git_project_root(&project_path)?;
+pub(crate) fn git_create_branch(
+    project_path: String,
+    branch: String,
+    execution_target: Option<ExecutionTarget>,
+) -> Result<(), String> {
+    let target = execution_target.unwrap_or_default();
+    let root = git_project_root(&target, &project_path)?;
     let branch = branch.trim();
     if branch.is_empty() || branch.starts_with('-') || branch.chars().any(char::is_whitespace) {
         return Err("Ungültiger Branch-Name.".to_string());
     }
     run_git(
+        &target,
         &root,
         &["switch".to_string(), "-c".to_string(), branch.to_string()],
     )
@@ -313,28 +370,35 @@ pub(crate) fn git_create_branch(project_path: String, branch: String) -> Result<
 }
 
 #[tauri::command]
-pub(crate) fn git_remote_action(project_path: String, action: String) -> Result<String, String> {
-    let root = git_project_root(&project_path)?;
+pub(crate) fn git_remote_action(
+    project_path: String,
+    action: String,
+    execution_target: Option<ExecutionTarget>,
+) -> Result<String, String> {
+    let target = execution_target.unwrap_or_default();
+    let root = git_project_root(&target, &project_path)?;
     let args = match action.as_str() {
         "fetch" => vec!["fetch".to_string(), "--prune".to_string()],
         "pull" => vec!["pull".to_string()],
         "push" => vec!["push".to_string()],
         _ => return Err("Unbekannte Git-Aktion.".to_string()),
     };
-    run_git(&root, &args)
+    run_git(&target, &root, &args)
 }
 
 #[tauri::command]
 pub(crate) fn git_conflict_content(
     project_path: String,
     file_path: String,
+    execution_target: Option<ExecutionTarget>,
 ) -> Result<GitConflictContent, String> {
-    let root = git_project_root(&project_path)?;
-    let target = safe_repo_path(&root, &file_path)?;
-    let (base, base_binary) = read_git_stage(&root, 1, &file_path)?;
-    let (current, current_binary) = read_git_stage(&root, 2, &file_path)?;
-    let (incoming, incoming_binary) = read_git_stage(&root, 3, &file_path)?;
-    let (working_tree, working_binary) = match fs::read(&target) {
+    let target = execution_target.unwrap_or_default();
+    let root = git_project_root(&target, &project_path)?;
+    let repo_path = safe_repo_path(&root, &file_path)?;
+    let (base, base_binary) = read_git_stage(&target, &root, 1, &file_path)?;
+    let (current, current_binary) = read_git_stage(&target, &root, 2, &file_path)?;
+    let (incoming, incoming_binary) = read_git_stage(&target, &root, 3, &file_path)?;
+    let (working_tree, working_binary) = match fs::read(&repo_path) {
         Ok(bytes) => match String::from_utf8(bytes) {
             Ok(value) => (value, false),
             Err(_) => (String::new(), true),
@@ -361,22 +425,33 @@ pub(crate) fn git_resolve_conflict(
     project_path: String,
     file_path: String,
     contents: String,
+    execution_target: Option<ExecutionTarget>,
 ) -> Result<(), String> {
-    let root = git_project_root(&project_path)?;
-    let target = safe_repo_path(&root, &file_path)?;
-    if let Some(parent) = target.parent() {
+    let target = execution_target.unwrap_or_default();
+    let root = git_project_root(&target, &project_path)?;
+    let repo_path = safe_repo_path(&root, &file_path)?;
+    if let Some(parent) = repo_path.parent() {
         fs::create_dir_all(parent)
             .map_err(|error| format!("Zielordner konnte nicht erstellt werden: {error}"))?;
     }
-    fs::write(&target, contents)
+    fs::write(&repo_path, contents)
         .map_err(|error| format!("Aufgelöste Datei konnte nicht gespeichert werden: {error}"))?;
-    run_git(&root, &["add".to_string(), "--".to_string(), file_path]).map(|_| ())
+    run_git(
+        &target,
+        &root,
+        &["add".to_string(), "--".to_string(), file_path],
+    )
+    .map(|_| ())
 }
 
 #[tauri::command]
-pub(crate) fn git_continue_operation(project_path: String) -> Result<(), String> {
-    let root = git_project_root(&project_path)?;
-    let operation = current_git_operation(&root)
+pub(crate) fn git_continue_operation(
+    project_path: String,
+    execution_target: Option<ExecutionTarget>,
+) -> Result<(), String> {
+    let target = execution_target.unwrap_or_default();
+    let root = git_project_root(&target, &project_path)?;
+    let operation = current_git_operation(&target, &root)
         .ok_or_else(|| "Es läuft keine fortsetzbare Git-Operation.".to_string())?;
     let args = match operation.as_str() {
         "merge" => vec!["merge".to_string(), "--continue".to_string()],
@@ -385,13 +460,17 @@ pub(crate) fn git_continue_operation(project_path: String) -> Result<(), String>
         "revert" => vec!["revert".to_string(), "--continue".to_string()],
         _ => return Err("Unbekannte Git-Operation.".to_string()),
     };
-    run_git(&root, &args).map(|_| ())
+    run_git(&target, &root, &args).map(|_| ())
 }
 
 #[tauri::command]
-pub(crate) fn git_abort_operation(project_path: String) -> Result<(), String> {
-    let root = git_project_root(&project_path)?;
-    let operation = current_git_operation(&root)
+pub(crate) fn git_abort_operation(
+    project_path: String,
+    execution_target: Option<ExecutionTarget>,
+) -> Result<(), String> {
+    let target = execution_target.unwrap_or_default();
+    let root = git_project_root(&target, &project_path)?;
+    let operation = current_git_operation(&target, &root)
         .ok_or_else(|| "Es läuft keine abbrechbare Git-Operation.".to_string())?;
     let args = match operation.as_str() {
         "merge" => vec!["merge".to_string(), "--abort".to_string()],
@@ -400,5 +479,5 @@ pub(crate) fn git_abort_operation(project_path: String) -> Result<(), String> {
         "revert" => vec!["revert".to_string(), "--abort".to_string()],
         _ => return Err("Unbekannte Git-Operation.".to_string()),
     };
-    run_git(&root, &args).map(|_| ())
+    run_git(&target, &root, &args).map(|_| ())
 }

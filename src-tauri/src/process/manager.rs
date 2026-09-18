@@ -1,14 +1,17 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     io::{BufRead, BufReader, Read},
     path::PathBuf,
     process::{Command, Stdio},
     thread,
+    time::Duration,
 };
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 #[cfg(target_os = "windows")]
 use crate::platform::launchers::hide_console_window;
+#[cfg(target_os = "windows")]
+use crate::platform::wsl;
 use crate::{
     platform::{
         execution::{build_execution_command, ExecutionTarget},
@@ -17,13 +20,25 @@ use crate::{
     process::{
         ansi::strip_ansi_codes,
         decode::decode_output_bytes,
-        state::{ProcessExitEvent, ProcessOutputEvent, ProcessStarted},
+        state::{
+            ProcessExitEvent, ProcessHandle, ProcessOutputEvent, ProcessRegistry, ProcessStarted,
+        },
     },
     projects::validation::display_path,
 };
 
-fn stream_process_output<R>(reader: R, app: AppHandle, run_id: String, stream: &'static str)
-where
+/// Injected by the (platform-gated) caller so this reader stays free of any
+/// `#[cfg]`: on WSL it checks a line against the pgid sentinel and records the
+/// match in the registry, returning whether the line was consumed.
+type PgidCapture = Box<dyn Fn(&str) -> bool + Send>;
+
+fn stream_process_output<R>(
+    reader: R,
+    app: AppHandle,
+    run_id: String,
+    stream: &'static str,
+    capture: Option<PgidCapture>,
+) where
     R: Read + Send + 'static,
 {
     thread::spawn(move || {
@@ -39,6 +54,13 @@ where
                         bytes.pop();
                     }
                     let line = strip_ansi_codes(decode_output_bytes(&bytes));
+
+                    if let Some(capture) = &capture {
+                        if capture(&line) {
+                            continue;
+                        }
+                    }
+
                     let _ = app.emit(
                         "code-deck://process-output",
                         ProcessOutputEvent {
@@ -87,29 +109,83 @@ pub(crate) fn start_process(
         return Err(format!("Projektordner nicht gefunden: {project_path}"));
     }
 
-    let run_dir = working_dir
-        .filter(|value| !value.trim().is_empty())
+    let working_dir_trimmed = working_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    let run_dir = working_dir_trimmed
         .map(PathBuf::from)
         .map(|value| {
             if value.is_absolute() {
                 value
             } else {
-                project_root.join(value)
+                project_root.join(&value)
             }
         })
-        .unwrap_or(project_root);
+        .unwrap_or_else(|| project_root.clone());
 
-    if !run_dir.is_dir() {
+    let target = execution_target.unwrap_or_default();
+
+    // A WSL working directory is resolved on the Linux side; when it is
+    // already Linux-absolute there is no host path to check `is_dir()` on.
+    #[cfg(target_os = "windows")]
+    let (target, skip_run_dir_check) = match target {
+        ExecutionTarget::Wsl { distro, linux_path } => {
+            let resolved_linux_path = wsl::wsl_working_directory(&linux_path, working_dir_trimmed)?;
+            let linux_absolute = working_dir_trimmed.is_some_and(|value| value.starts_with('/'));
+            (
+                ExecutionTarget::Wsl {
+                    distro,
+                    linux_path: resolved_linux_path,
+                },
+                linux_absolute,
+            )
+        }
+        native @ ExecutionTarget::Native { .. } => (native, false),
+    };
+    #[cfg(not(target_os = "windows"))]
+    let skip_run_dir_check = false;
+
+    if !skip_run_dir_check && !run_dir.is_dir() {
         return Err(format!(
             "Arbeitsverzeichnis nicht gefunden: {}",
             display_path(&run_dir)
         ));
     }
 
-    let target = execution_target.unwrap_or_default();
-    let mut process = build_execution_command(&target, &command, &run_dir)?;
+    let env: BTreeMap<String, String> = env.into_iter().collect();
+
+    // The sentinel line is prepended to the WSL script only; native runs pass
+    // the command through unchanged and never build a capture.
+    #[cfg(target_os = "windows")]
+    let (script, capture) = match &target {
+        ExecutionTarget::Wsl { .. } => {
+            let marker = wsl::pgid_marker(&run_id);
+            let scripted = wsl::script_with_pgid_marker(&marker, &command);
+            let app_for_capture = app.clone();
+            let run_id_for_capture = run_id.clone();
+            let capture: PgidCapture =
+                Box::new(
+                    move |line: &str| match wsl::parse_pgid_line(&marker, line) {
+                        Some(pgid) => {
+                            app_for_capture
+                                .state::<ProcessRegistry>()
+                                .set_pgid(&run_id_for_capture, pgid);
+                            true
+                        }
+                        None => false,
+                    },
+                );
+            (scripted, Some(capture))
+        }
+        ExecutionTarget::Native { .. } => (command.clone(), None),
+    };
+    #[cfg(not(target_os = "windows"))]
+    let (script, capture): (String, Option<PgidCapture>) = (command.clone(), None);
+
+    let mut process = build_execution_command(&target, &script, &run_dir, &env)?;
     process
-        .envs(env)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -119,12 +195,23 @@ pub(crate) fn start_process(
         .map_err(|error| format!("Command konnte nicht gestartet werden: {error}"))?;
     let pid = child.id();
 
+    let handle = match &target {
+        ExecutionTarget::Native { .. } => ProcessHandle::Native { pid },
+        ExecutionTarget::Wsl { distro, .. } => ProcessHandle::Wsl {
+            launcher_pid: pid,
+            distro: distro.clone(),
+            pgid: None,
+        },
+    };
+    app.state::<ProcessRegistry>()
+        .register(run_id.clone(), handle);
+
     if let Some(stdout) = child.stdout.take() {
-        stream_process_output(stdout, app.clone(), run_id.clone(), "stdout");
+        stream_process_output(stdout, app.clone(), run_id.clone(), "stdout", capture);
     }
 
     if let Some(stderr) = child.stderr.take() {
-        stream_process_output(stderr, app.clone(), run_id.clone(), "stderr");
+        stream_process_output(stderr, app.clone(), run_id.clone(), "stderr", None);
     }
 
     thread::spawn(move || {
@@ -133,6 +220,7 @@ pub(crate) fn start_process(
             Ok(status) => (status.code(), status.success()),
             Err(_) => (None, false),
         };
+        app.state::<ProcessRegistry>().take(&run_id);
         let _ = app.emit(
             "code-deck://process-exit",
             ProcessExitEvent {
@@ -157,44 +245,167 @@ pub(crate) fn start_process(
     Ok(ProcessStarted { pid })
 }
 
-pub(crate) fn stop_process(pid: u32) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    {
-        let mut command = Command::new("taskkill");
-        command
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        hide_console_window(&mut command);
-        let status = command
+const PGID_WAIT_ATTEMPTS: u32 = 40;
+const PGID_WAIT_DELAY: Duration = Duration::from_millis(50);
+
+// Stop pressed between spawn and the sentinel line finds `pgid: None` even
+// though the group is about to exist; a cold-starting distro that never runs
+// `bash` legitimately has none, so the wait stays bounded, not open-ended.
+fn wait_for_pgid(
+    run_id: &str,
+    registry: &ProcessRegistry,
+    attempts: u32,
+    delay: Duration,
+) -> Option<i32> {
+    for _ in 0..attempts {
+        if let Some(ProcessHandle::Wsl {
+            pgid: Some(pgid), ..
+        }) = registry.get(run_id)
+        {
+            return Some(pgid);
+        }
+        thread::sleep(delay);
+    }
+    None
+}
+
+pub(crate) fn stop_process(
+    run_id: &str,
+    pid: u32,
+    registry: &ProcessRegistry,
+) -> Result<(), String> {
+    match registry.get(run_id) {
+        Some(ProcessHandle::Wsl {
+            launcher_pid,
+            distro,
+            pgid,
+        }) => {
+            let pgid = pgid
+                .or_else(|| wait_for_pgid(run_id, registry, PGID_WAIT_ATTEMPTS, PGID_WAIT_DELAY));
+            match pgid {
+                Some(pgid) => {
+                    stop_wsl_process_group(&distro, pgid)?;
+                    // The launcher normally exits by itself once the group dies, so
+                    // it not being found here is the happy path, not a failure, and
+                    // its result must not surface as an error.
+                    let _ = stop_native_process(launcher_pid);
+                    Ok(())
+                }
+                None => stop_native_process(launcher_pid),
+            }
+        }
+        _ => stop_native_process(pid),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn stop_wsl_process_group(distro: &str, pgid: i32) -> Result<(), String> {
+    let script = wsl::stop_group_script(pgid);
+    let mut command = Command::new("wsl.exe");
+    command
+        .args(["-d", distro, "--exec", "bash", "-lc", &script])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    hide_console_window(&mut command);
+    let output = command
+        .output()
+        .map_err(|error| format!("Prozess konnte nicht beendet werden: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        // The script itself always exits 0, so a failure here comes from
+        // wsl.exe, whose own messages are UTF-16LE rather than child output.
+        let detail = wsl::decode_wsl_output(&output.stderr);
+        Err(wsl::wsl_error_message(
+            "Prozess konnte nicht beendet werden.",
+            distro,
+            "",
+            detail.trim(),
+        ))
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn stop_wsl_process_group(_distro: &str, _pgid: i32) -> Result<(), String> {
+    Err("WSL ist nur unter Windows verfügbar.".to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn stop_native_process(pid: u32) -> Result<(), String> {
+    let mut command = Command::new("taskkill");
+    command
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    hide_console_window(&mut command);
+    let status = command
+        .status()
+        .map_err(|error| format!("Prozess konnte nicht beendet werden: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("taskkill meldete einen Fehler für PID {pid}."))
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn stop_native_process(pid: u32) -> Result<(), String> {
+    let group = format!("-{pid}");
+    let status = Command::new("kill")
+        .args(["-TERM", &group])
+        .status()
+        .map_err(|error| format!("Prozess konnte nicht beendet werden: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        let fallback = Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
             .status()
             .map_err(|error| format!("Prozess konnte nicht beendet werden: {error}"))?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(format!("taskkill meldete einen Fehler für PID {pid}."))
-        }
+        fallback
+            .success()
+            .then_some(())
+            .ok_or_else(|| format!("kill meldete einen Fehler für PID {pid}."))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wait_for_pgid_returns_immediately_once_it_is_set() {
+        let registry = ProcessRegistry::default();
+        registry.register(
+            "run-1".to_string(),
+            ProcessHandle::Wsl {
+                launcher_pid: 111,
+                distro: "Ubuntu".to_string(),
+                pgid: Some(222),
+            },
+        );
+        assert_eq!(
+            wait_for_pgid("run-1", &registry, 40, Duration::from_millis(1)),
+            Some(222)
+        );
     }
 
-    #[cfg(not(target_os = "windows"))]
-    {
-        let group = format!("-{pid}");
-        let status = Command::new("kill")
-            .args(["-TERM", &group])
-            .status()
-            .map_err(|error| format!("Prozess konnte nicht beendet werden: {error}"))?;
-        if status.success() {
-            Ok(())
-        } else {
-            let fallback = Command::new("kill")
-                .args(["-TERM", &pid.to_string()])
-                .status()
-                .map_err(|error| format!("Prozess konnte nicht beendet werden: {error}"))?;
-            fallback
-                .success()
-                .then_some(())
-                .ok_or_else(|| format!("kill meldete einen Fehler für PID {pid}."))
-        }
+    #[test]
+    fn wait_for_pgid_gives_up_after_the_bounded_attempts() {
+        let registry = ProcessRegistry::default();
+        registry.register(
+            "run-1".to_string(),
+            ProcessHandle::Wsl {
+                launcher_pid: 111,
+                distro: "Ubuntu".to_string(),
+                pgid: None,
+            },
+        );
+        assert_eq!(
+            wait_for_pgid("run-1", &registry, 3, Duration::from_millis(1)),
+            None
+        );
     }
 }

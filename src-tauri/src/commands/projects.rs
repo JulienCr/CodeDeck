@@ -127,7 +127,10 @@ pub(crate) fn clone_repository(
 }
 
 #[tauri::command]
-pub(crate) fn inspect_project(path: String) -> Result<ProjectInspection, String> {
+pub(crate) fn inspect_project(
+    path: String,
+    execution_target: Option<ExecutionTarget>,
+) -> Result<ProjectInspection, String> {
     let root = PathBuf::from(&path);
     if !root.is_dir() {
         return Ok(ProjectInspection {
@@ -146,7 +149,10 @@ pub(crate) fn inspect_project(path: String) -> Result<ProjectInspection, String>
         });
     }
 
-    Ok(inspect_project_path(&root))
+    Ok(inspect_project_path(
+        &execution_target.unwrap_or_default(),
+        &root,
+    ))
 }
 
 #[tauri::command]
@@ -171,7 +177,7 @@ pub(crate) fn scan_projects(path: String) -> Result<Vec<ProjectCandidate>, Strin
         if markers.is_empty() {
             continue;
         }
-        let inspection = inspect_project_path(entry.path());
+        let inspection = inspect_project_path(&ExecutionTarget::default(), entry.path());
         candidates.push(ProjectCandidate {
             name: project_name(entry.path()),
             path: display_path(entry.path()),

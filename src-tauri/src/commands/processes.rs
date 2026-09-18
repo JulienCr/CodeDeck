@@ -1,10 +1,13 @@
 use std::collections::HashMap;
 
-use tauri::AppHandle;
+use tauri::{AppHandle, State};
 
 use crate::{
     platform::execution::ExecutionTarget,
-    process::{manager, state::ProcessStarted},
+    process::{
+        manager,
+        state::{ProcessRegistry, ProcessStarted},
+    },
 };
 
 #[tauri::command]
@@ -34,6 +37,10 @@ pub(crate) fn start_process(
 }
 
 #[tauri::command]
-pub(crate) fn stop_process(pid: u32) -> Result<(), String> {
-    manager::stop_process(pid)
+pub(crate) fn stop_process(
+    run_id: String,
+    pid: u32,
+    registry: State<'_, ProcessRegistry>,
+) -> Result<(), String> {
+    manager::stop_process(&run_id, pid, registry.inner())
 }

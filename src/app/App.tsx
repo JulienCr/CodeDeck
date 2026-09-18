@@ -21,6 +21,7 @@ import {
   chooseExportPath,
   detectCommandShells,
   detectEditors,
+  detectWslDistros,
   inspectProject,
   isTauri,
   launchTemplate,
@@ -29,12 +30,13 @@ import {
   openTarget,
   openTerminal,
   readTextFile,
+  resolveWslLocation,
   setApplicationLanguage,
   startProcess,
   stopProcess,
   writeTextFile,
 } from "../shared/lib/tauri";
-import { resolveExecutionTarget, resolveNativeShell } from "../shared/lib/execution";
+import { defaultExecutionTarget, isWslUncPath, resolveExecutionTarget } from "../shared/lib/execution";
 import {
   checkForAppUpdate,
   getCurrentAppVersion,
@@ -156,9 +158,11 @@ export function App() {
   const [updateProgress, setUpdateProgress] = useState<UpdateProgress>();
   const [updateError, setUpdateError] = useState<string>();
   const [commandShells, setCommandShells] = useState<CommandShellInfo[]>([]);
+  const [wslDistros, setWslDistros] = useState<string[]>([]);
   const searchRef = useRef<HTMLInputElement>(null);
   const startupUpdateCheckStarted = useRef(false);
   const startupCommandShellScanStarted = useRef(false);
+  const startupWslScanStarted = useRef(false);
   const startupIdeScanStarted = useRef(false);
   const startupLaunchSetsStarted = useRef(false);
   const t = (german: string, english: string) => translate(data.settings.language, german, english);
@@ -331,6 +335,15 @@ export function App() {
     void detectCommandShells()
       .then(setCommandShells)
       .catch(() => setCommandShells([]));
+  }, []);
+
+  useEffect(() => {
+    if (startupWslScanStarted.current || !isTauri()) return;
+    startupWslScanStarted.current = true;
+
+    void detectWslDistros()
+      .then(setWslDistros)
+      .catch(() => setWslDistros([]));
   }, []);
 
   useEffect(() => {
@@ -663,7 +676,7 @@ export function App() {
       processHistory: current.processHistory.map((entry) => entry.id === process.id ? { ...entry, status: "stopping" } : entry),
     }));
     try {
-      await stopProcess(process.pid);
+      await stopProcess(process.id, process.pid);
     } catch (error) {
       pushToast("error", t("Prozess konnte nicht beendet werden", "Could not stop process"), errorMessage(error));
       setData((current) => ({
@@ -675,7 +688,7 @@ export function App() {
 
   async function refreshInspection(project: Project) {
     try {
-      const inspection = await inspectProject(project.path);
+      const inspection = await inspectProject(project.path, resolveExecutionTarget(project, data.settings));
       updateProject({ ...project, inspection, updatedAt: new Date().toISOString() });
       pushToast("success", t("Projektstatus aktualisiert", "Project status refreshed"), project.name);
       return inspection;
@@ -687,7 +700,23 @@ export function App() {
 
   async function addCandidate(candidate: ProjectCandidate) {
     try {
-      const inspection = await inspectProject(candidate.path);
+      let executionTarget = defaultExecutionTarget();
+      let executionRuntime: "wsl" | undefined;
+      let wslDistro: string | undefined;
+      let wslPath: string | undefined;
+      if (isWslUncPath(candidate.path)) {
+        // A failed WSL resolution must not block adding the project; fall back to native.
+        try {
+          const location = await resolveWslLocation(candidate.path);
+          executionTarget = { type: "wsl", distro: location.distro, linuxPath: location.linuxPath };
+          executionRuntime = "wsl";
+          wslDistro = location.distro;
+          wslPath = location.linuxPath;
+        } catch {
+          // keep the native fallback
+        }
+      }
+      const inspection = await inspectProject(candidate.path, executionTarget);
       const now = new Date().toISOString();
       addProject({
         id: createId(),
@@ -705,6 +734,9 @@ export function App() {
         buildCommand: suggestBuildCommand(inspection),
         runCommand: suggestRunCommand(inspection),
         devPort: suggestDevPort(inspection),
+        executionRuntime,
+        wslDistro,
+        wslPath,
       });
     } catch (error) {
       pushToast("error", t("Projekt konnte nicht hinzugefügt werden", "Could not add project"), errorMessage(error));
@@ -985,7 +1017,7 @@ export function App() {
                   key={project.id}
                   project={project}
                   editor={editorById.get(project.preferredEditorId ?? "")}
-                  effectiveCommandShell={commandShells.length > 0 ? resolveNativeShell(project, data.settings) : "platformDefault"}
+                  executionTarget={resolveExecutionTarget(project, data.settings)}
                   onOpenDetails={() => setSelectedProjectId(project.id)}
                   onOpenEditor={() => void openProjectEditor(project)}
                   onOpenTodos={() => setTodoProjectId(project.id)}
@@ -1046,6 +1078,7 @@ export function App() {
         editors={data.editors}
         githubToken={data.settings.githubToken}
         commandShells={commandShells}
+        wslDistros={wslDistros}
         globalCommandShell={data.settings.commandShell}
         onClose={() => setSelectedProjectId(undefined)}
         onUpdate={updateProject}

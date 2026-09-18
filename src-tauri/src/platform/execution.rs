@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::Path;
 #[cfg(target_os = "windows")]
 use std::path::PathBuf;
@@ -7,6 +8,8 @@ use std::process::Command;
 #[cfg(target_os = "windows")]
 use crate::platform::launchers::hide_console_window;
 use crate::platform::launchers::shell_command;
+#[cfg(target_os = "windows")]
+use crate::platform::wsl;
 #[cfg(target_os = "windows")]
 use crate::projects::validation::display_path;
 
@@ -39,6 +42,8 @@ pub(crate) enum ExecutionTarget {
         #[serde(default)]
         shell: NativeShell,
     },
+    #[serde(rename_all = "camelCase")]
+    Wsl { distro: String, linux_path: String },
 }
 
 impl Default for ExecutionTarget {
@@ -142,20 +147,36 @@ fn build_windows_command(
     target: &ExecutionTarget,
     script: &str,
     working_dir: &Path,
+    env: &BTreeMap<String, String>,
 ) -> Result<Command, String> {
-    let ExecutionTarget::Native { shell } = target;
+    match target {
+        ExecutionTarget::Native { shell } => {
+            build_windows_native_command(*shell, script, working_dir, env)
+        }
+        ExecutionTarget::Wsl { distro, linux_path } => {
+            build_wsl_command(distro, linux_path, script, env)
+        }
+    }
+}
 
+#[cfg(target_os = "windows")]
+fn build_windows_native_command(
+    shell: NativeShell,
+    script: &str,
+    working_dir: &Path,
+    env: &BTreeMap<String, String>,
+) -> Result<Command, String> {
     if matches!(shell, NativeShell::PlatformDefault | NativeShell::Cmd) {
         let mut command = shell_command(script);
-        command.current_dir(working_dir);
+        command.current_dir(working_dir).envs(env);
         return Ok(command);
     }
 
-    let executable = windows_shell_executable(*shell);
-    let program = resolve_windows_shell(*shell).ok_or_else(|| {
+    let executable = windows_shell_executable(shell);
+    let program = resolve_windows_shell(shell).ok_or_else(|| {
         shell_not_found_message(
             "Command konnte nicht gestartet werden.",
-            *shell,
+            shell,
             executable,
             working_dir,
         )
@@ -165,8 +186,52 @@ fn build_windows_command(
     command
         .args(powershell_arguments(script))
         .current_dir(working_dir)
+        // Defaults first, `env` last: a user-configured PYTHONUTF8 must win,
+        // matching the pre-PR order where `.envs()` was applied after this
+        // command was built.
         .env("PYTHONUTF8", "1")
-        .env("PYTHONIOENCODING", "utf-8");
+        .env("PYTHONIOENCODING", "utf-8")
+        .envs(env);
+    hide_console_window(&mut command);
+    Ok(command)
+}
+
+#[cfg(target_os = "windows")]
+fn build_wsl_command(
+    distro: &str,
+    linux_path: &str,
+    script: &str,
+    env: &BTreeMap<String, String>,
+) -> Result<Command, String> {
+    let distro = distro.trim();
+    let linux_path = linux_path.trim();
+    if distro.is_empty() || linux_path.is_empty() {
+        let detail = if distro.is_empty() {
+            "Für dieses Projekt ist keine WSL-Distribution ausgewählt. Wähle in den Projekteinstellungen eine Distribution aus."
+        } else {
+            "Für dieses Projekt ist kein Linux-Pfad hinterlegt. Lege ihn in den Projekteinstellungen fest."
+        };
+        return Err(wsl::wsl_error_message(
+            "Command konnte nicht gestartet werden.",
+            distro,
+            linux_path,
+            detail,
+        ));
+    }
+
+    // Unlike native, an invalid name here could corrupt the `WSLENV` list on
+    // the Linux side, so it is rejected instead of passed through.
+    let env = wsl::validated_env(env)?;
+
+    let mut command = Command::new("wsl.exe");
+    command.args(wsl::wsl_execution_arguments(distro, linux_path, script));
+    let (pairs, wslenv) = wsl::wsl_env_assignment(&env);
+    for (name, value) in &pairs {
+        command.env(name, value);
+    }
+    if let Some(wslenv) = wslenv {
+        command.env("WSLENV", wslenv);
+    }
     hide_console_window(&mut command);
     Ok(command)
 }
@@ -175,18 +240,23 @@ pub(crate) fn build_execution_command(
     target: &ExecutionTarget,
     script: &str,
     working_dir: &Path,
+    env: &BTreeMap<String, String>,
 ) -> Result<Command, String> {
     #[cfg(target_os = "windows")]
     {
-        build_windows_command(target, script, working_dir)
+        build_windows_command(target, script, working_dir, env)
     }
 
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = target;
-        let mut command = shell_command(script);
-        command.current_dir(working_dir);
-        Ok(command)
+        match target {
+            ExecutionTarget::Native { .. } => {
+                let mut command = shell_command(script);
+                command.current_dir(working_dir).envs(env);
+                Ok(command)
+            }
+            ExecutionTarget::Wsl { .. } => Err("WSL ist nur unter Windows verfügbar.".to_string()),
+        }
     }
 }
 
@@ -252,6 +322,20 @@ mod tests {
         assert_eq!(serde_json::to_string(&target).unwrap(), json);
     }
 
+    #[test]
+    fn config_shape_round_trips_wsl_target() {
+        let json = r#"{"type":"wsl","distro":"Ubuntu","linuxPath":"/home/julien/dev/foo"}"#;
+        let target: ExecutionTarget = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            target,
+            ExecutionTarget::Wsl {
+                distro: "Ubuntu".to_string(),
+                linux_path: "/home/julien/dev/foo".to_string(),
+            }
+        );
+        assert_eq!(serde_json::to_string(&target).unwrap(), json);
+    }
+
     #[cfg(target_os = "windows")]
     mod windows {
         use super::super::*;
@@ -260,8 +344,13 @@ mod tests {
         #[test]
         fn platform_default_matches_existing_cmd_behavior() {
             let target = ExecutionTarget::default();
-            let command =
-                build_execution_command(&target, "pnpm dev", Path::new("C:\\dev\\foo")).unwrap();
+            let command = build_execution_command(
+                &target,
+                "pnpm dev",
+                Path::new("C:\\dev\\foo"),
+                &BTreeMap::new(),
+            )
+            .unwrap();
 
             assert_eq!(command.get_program(), "cmd.exe");
             let args: Vec<_> = command
@@ -363,6 +452,120 @@ Projekt: C:\\dev\\foo\n\n\
 pwsh.exe wurde nicht gefunden. Wähle in den Einstellungen eine andere Command-Shell."
             );
         }
+
+        #[test]
+        fn build_execution_command_for_wsl_uses_wsl_exe() {
+            let target = ExecutionTarget::Wsl {
+                distro: "Ubuntu".to_string(),
+                linux_path: "/home/julien/dev/foo".to_string(),
+            };
+            let command = build_execution_command(
+                &target,
+                "pnpm dev",
+                Path::new("C:\\dev\\foo"),
+                &BTreeMap::new(),
+            )
+            .unwrap();
+
+            assert_eq!(command.get_program(), "wsl.exe");
+            let args: Vec<_> = command
+                .get_args()
+                .map(|value| value.to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(
+                args,
+                vec![
+                    "-d".to_string(),
+                    "Ubuntu".to_string(),
+                    "--cd".to_string(),
+                    "/home/julien/dev/foo".to_string(),
+                    "--exec".to_string(),
+                    "bash".to_string(),
+                    "-lc".to_string(),
+                    "pnpm dev".to_string(),
+                ]
+            );
+        }
+
+        #[test]
+        fn build_execution_command_for_wsl_sets_env_via_command_env_and_wslenv() {
+            let target = ExecutionTarget::Wsl {
+                distro: "Ubuntu".to_string(),
+                linux_path: "/home/julien".to_string(),
+            };
+            let mut env = BTreeMap::new();
+            env.insert("PORT".to_string(), "5173".to_string());
+            let command =
+                build_execution_command(&target, "pnpm dev", Path::new("C:\\dev\\foo"), &env)
+                    .unwrap();
+
+            let args: Vec<_> = command
+                .get_args()
+                .map(|value| value.to_string_lossy().into_owned())
+                .collect();
+            assert!(
+                !args.iter().any(|value| value.contains("PORT")),
+                "a configured variable must never sit in the command line: {args:?}"
+            );
+            assert!(command.get_envs().any(|(name, value)| {
+                name == std::ffi::OsStr::new("PORT") && value == Some(std::ffi::OsStr::new("5173"))
+            }));
+            assert!(command.get_envs().any(|(name, value)| {
+                name == std::ffi::OsStr::new("WSLENV")
+                    && value == Some(std::ffi::OsStr::new("PORT"))
+            }));
+        }
+
+        #[test]
+        fn build_execution_command_for_wsl_rejects_an_invalid_env_name() {
+            let target = ExecutionTarget::Wsl {
+                distro: "Ubuntu".to_string(),
+                linux_path: "/home/julien".to_string(),
+            };
+            let mut env = BTreeMap::new();
+            env.insert("A B".to_string(), "x".to_string());
+            let error =
+                build_execution_command(&target, "pnpm dev", Path::new("C:\\dev\\foo"), &env)
+                    .unwrap_err();
+            assert_eq!(error, "Ungültiger Name für eine Umgebungsvariable: A B");
+        }
+
+        #[test]
+        fn build_execution_command_for_windows_native_applies_env() {
+            let target = ExecutionTarget::default();
+            let mut env = BTreeMap::new();
+            env.insert("PORT".to_string(), "5173".to_string());
+            let command =
+                build_execution_command(&target, "pnpm dev", Path::new("C:\\dev\\foo"), &env)
+                    .unwrap();
+            assert!(command.get_envs().any(|(name, value)| {
+                name == std::ffi::OsStr::new("PORT") && value == Some(std::ffi::OsStr::new("5173"))
+            }));
+        }
+
+        #[test]
+        fn build_execution_command_for_wsl_rejects_an_empty_distro() {
+            let target = ExecutionTarget::Wsl {
+                distro: String::new(),
+                linux_path: "/home/julien/dev/foo".to_string(),
+            };
+            let error = build_execution_command(
+                &target,
+                "pnpm dev",
+                Path::new("C:\\dev\\foo"),
+                &BTreeMap::new(),
+            )
+            .unwrap_err();
+
+            assert_eq!(
+                error,
+                "Command konnte nicht gestartet werden.\n\n\
+Umgebung: WSL\n\
+Distribution: —\n\
+Pfad: /home/julien/dev/foo\n\n\
+Für dieses Projekt ist keine WSL-Distribution ausgewählt. Wähle in den Projekteinstellungen eine Distribution aus."
+            );
+        }
     }
 
     #[cfg(all(test, not(target_os = "windows")))]
@@ -373,8 +576,13 @@ pwsh.exe wurde nicht gefunden. Wähle in den Einstellungen eine andere Command-S
         #[test]
         fn build_execution_command_uses_the_login_shell() {
             let target = ExecutionTarget::default();
-            let command =
-                build_execution_command(&target, "pnpm dev", Path::new("/tmp/foo")).unwrap();
+            let command = build_execution_command(
+                &target,
+                "pnpm dev",
+                Path::new("/tmp/foo"),
+                &BTreeMap::new(),
+            )
+            .unwrap();
 
             assert_eq!(command.get_program(), "/bin/sh");
             let args: Vec<_> = command
@@ -382,6 +590,23 @@ pwsh.exe wurde nicht gefunden. Wähle in den Einstellungen eine andere Command-S
                 .map(|value| value.to_string_lossy().into_owned())
                 .collect();
             assert_eq!(args, vec!["-lc".to_string(), "pnpm dev".to_string()]);
+        }
+
+        #[test]
+        fn build_execution_command_rejects_wsl_off_windows() {
+            let target = ExecutionTarget::Wsl {
+                distro: "Ubuntu".to_string(),
+                linux_path: "/home/julien/dev/foo".to_string(),
+            };
+            let error = build_execution_command(
+                &target,
+                "pnpm dev",
+                Path::new("/tmp/foo"),
+                &BTreeMap::new(),
+            )
+            .unwrap_err();
+
+            assert_eq!(error, "WSL ist nur unter Windows verfügbar.");
         }
     }
 }
